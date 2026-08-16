@@ -232,8 +232,10 @@ JSON
 @test "--hooks never writes a trusted_hash" {
   mkdir -p "$FAKE_HOME/.codex"
   "$REPO_ROOT/install.sh" --hooks >/dev/null
-  ! grep -q 'trusted_hash' "$FAKE_HOME/.codex/hooks.json"
-  ! grep -q 'trusted_hash' "$FAKE_HOME/.codex/config.toml"
+  run grep -q 'trusted_hash' "$FAKE_HOME/.codex/hooks.json"
+  [ "$status" -ne 0 ]
+  run grep -q 'trusted_hash' "$FAKE_HOME/.codex/config.toml"
+  [ "$status" -ne 0 ]
 }
 
 @test "--hooks tells the user to expect a codex trust prompt" {
