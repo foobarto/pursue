@@ -457,6 +457,14 @@ install_skill_dir() {
 # string --no-hooks looks for.
 # ---------------------------------------------------------------------------
 
+# Enforcement bookkeeping, consumed by report_hook_enforcement() at the very
+# end of the run.  These record what actually happened, not what was asked
+# for: EP-0001 §Portability requires the installer to say when enforcement is
+# not active rather than leaving the operator to infer it from a `done:`.
+declare -a hook_targets=()     # harnesses where hook registration ran
+declare -a hookless_clis=()    # detected harnesses with no hook surface
+codex_feature_unset=0          # codex hooks registered behind a gate we could not set
+
 # Emit "<Event> <absolute-script-path>" per registered hook.
 pursue_hook_entries() {
   printf '%s %s\n' SessionStart "$repo_root/hooks/session-start.sh"
@@ -683,6 +691,7 @@ ensure_codex_hooks_feature() {
   if codex_features_present "$config_toml"; then
     echo "warn: [features] exists in $config_toml but hooks is not true" >&2
     echo "      add 'hooks = true' under [features] to enable pursue's hooks" >&2
+    codex_feature_unset=1
     return 0
   fi
   printf '\n[features]\nhooks = true\n' >> "$config_toml"
@@ -720,6 +729,31 @@ uninstall_hooks_codex() {
   echo "note: stale [hooks.state] entries may remain in config.toml; Codex prunes them."
 }
 
+# Say, as the last thing printed, whether enforcement is actually live.
+#
+# EP-0001 §Portability: losing hooks is "a real reduction in guarantees, not
+# a cosmetic one, and the installer must say so at install time rather than
+# leaving the operator to infer it".  Two paths used to end in exit 0 with
+# `done:` as the final line and no enforcement at all — Codex registered
+# behind a [features] gate we declined to rewrite, and --hooks on a machine
+# where every detected harness is hookless, which printed nothing about
+# hooks whatsoever.  A warning emitted before the success line is a warning
+# the operator scrolls past.
+report_hook_enforcement() {
+  local list
+  if (( codex_feature_unset )); then
+    echo "warning: codex hooks registered but NOT enabled — add 'hooks = true' under [features] in ${CLI_PARENT[codex]}/config.toml" >&2
+  fi
+  if (( ${#hook_targets[@]} == 0 )); then
+    echo "warning: --hooks registered nothing — no harness with a hook surface was detected" >&2
+    echo "         pursue runs unenforced here; only Claude Code and Codex expose hooks" >&2
+  fi
+  if (( ${#hookless_clis[@]} > 0 )); then
+    list="$(printf '%s, ' "${hookless_clis[@]}")"
+    echo "note: ${list%, } detected — no hook surface, no enforcement there" >&2
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
@@ -739,8 +773,9 @@ if (( do_hooks )); then
   require_jq_for_hooks
   for cli in "${detected_clis[@]}"; do
     case "$cli" in
-      claude-code) install_hooks_claude ;;
-      codex)       install_hooks_codex ;;
+      claude-code) install_hooks_claude; hook_targets+=("$cli") ;;
+      codex)       install_hooks_codex;  hook_targets+=("$cli") ;;
+      *)           hookless_clis+=("$cli") ;;
     esac
   done
 fi
@@ -758,4 +793,10 @@ fi
 if (( dry_run )); then
   echo ""
   echo "(dry-run — no changes written)"
+fi
+
+# Deliberately the last output of the run: whatever else was printed, the
+# final word is whether enforcement is actually active.
+if (( do_hooks )); then
+  report_hook_enforcement
 fi

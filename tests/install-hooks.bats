@@ -326,6 +326,42 @@ JSON
     "$FAKE_HOME/.codex/config.toml"
 }
 
+# EP-0001 §Portability: the installer must say at install time when
+# enforcement is not actually active. Both paths below used to end with
+# `done:` and exit 0, so the last thing the operator saw was success.
+@test "--hooks ends with a warning when the codex hooks feature is not enabled" {
+  mkdir -p "$FAKE_HOME/.codex"
+  printf '[features]\nother = 1\n' > "$FAKE_HOME/.codex/config.toml"
+  run "$REPO_ROOT/install.sh" --hooks
+  [ "$status" -eq 0 ]
+  [[ "${lines[-1]}" == "warning: codex hooks registered but NOT enabled"* ]]
+  [[ "${lines[-1]}" == *"$FAKE_HOME/.codex/config.toml"* ]]
+}
+
+@test "--hooks says nothing was registered when only hookless harnesses exist" {
+  mkdir -p "$FAKE_HOME/.gemini" "$FAKE_HOME/.cursor"
+  run "$REPO_ROOT/install.sh" --hooks
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no harness with a hook surface"* ]]
+  [[ "${lines[-1]}" == "note: gemini, cursor detected — no hook surface, no enforcement there" ]]
+}
+
+@test "--hooks still flags hookless harnesses alongside a working one" {
+  mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/.cursor"
+  run "$REPO_ROOT/install.sh" --hooks
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"no harness with a hook surface"* ]]
+  [[ "${lines[-1]}" == "note: cursor detected — no hook surface, no enforcement there" ]]
+}
+
+@test "--hooks reports no enforcement problem when codex is fully enabled" {
+  mkdir -p "$FAKE_HOME/.codex"
+  run "$REPO_ROOT/install.sh" --hooks
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"NOT enabled"* ]]
+  [[ "$output" != *"no hook surface"* ]]
+}
+
 @test "--hooks warns and does not rewrite when [features] exists without hooks" {
   mkdir -p "$FAKE_HOME/.codex"
   printf '[features]\nother = 1\n' > "$FAKE_HOME/.codex/config.toml"
