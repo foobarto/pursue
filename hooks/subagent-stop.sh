@@ -34,7 +34,7 @@ pursue_verdict_beat() {
 }
 
 pursue_verdict_main() {
-  local cwd root goal_dir status message block anchor
+  local cwd root goal_dir status message block anchor agent rc
 
   pursue_read_payload
   pursue_have_jq || return 0
@@ -67,19 +67,35 @@ pursue_verdict_main() {
   [[ -n "$block" ]] || return 0
 
   anchor="$(pursue_anchor "$root" "$goal_dir")"
+  agent="$(pursue_payload_field agent_id)"
 
-  if pursue_verdict_validate "$block" && pursue_verdict_write "$goal_dir" "$anchor" "$block"; then
-    pursue_detect_trigger "$goal_dir" verdict-recorded \
-      "$(jq -cn --arg a "$anchor" \
-           --arg v "$(printf '%s' "$block" | jq -r '.verdict')" \
-           '{anchor: $a, verdict: $v}')"
-  else
-    # Discarded, never repaired.  In Plan 3 this leaves the originating
-    # trigger unconsumed, so the gate demands another review rather than
-    # letting a garbled verdict pass for consent.
+  # Discarded, never repaired.  In Plan 3 a rejection leaves the originating
+  # trigger unconsumed, so the gate demands another review rather than
+  # letting a garbled — or downgraded — verdict pass for consent.
+  if ! pursue_verdict_validate "$block"; then
     pursue_detect_trigger "$goal_dir" verdict-rejected \
       "$(jq -cn --arg a "$anchor" '{anchor: $a, reason: "failed strict decoding"}')"
+    return 0
   fi
+
+  pursue_verdict_write "$goal_dir" "$anchor" "$block" "$agent"; rc=$?
+  case "$rc" in
+    0)
+      pursue_detect_trigger "$goal_dir" verdict-recorded \
+        "$(jq -cn --arg a "$anchor" --arg g "$agent" \
+             --arg v "$(printf '%s' "$block" | jq -r '.verdict')" \
+             '{anchor: $a, verdict: $v} + (if $g == "" then {} else {agent_id: $g} end)')"
+      ;;
+    2)
+      pursue_detect_trigger "$goal_dir" verdict-rejected \
+        "$(jq -cn --arg a "$anchor" \
+             '{anchor: $a, reason: "a pause or stop is already recorded at this anchor"}')"
+      ;;
+    *)
+      pursue_detect_trigger "$goal_dir" verdict-rejected \
+        "$(jq -cn --arg a "$anchor" '{anchor: $a, reason: "could not be written"}')"
+      ;;
+  esac
   return 0
 }
 

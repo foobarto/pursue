@@ -70,16 +70,43 @@ pursue_verdict_validate() {
 }
 
 # Store a validated verdict under the anchor it reviewed, with that anchor
-# recorded inside it.
+# and the reviewer's identity recorded inside it.
+#
+#   $4 (optional) — the reviewing subagent's agent_id.  The next slice needs
+#   it to check that the verifier is not the watchdog that raised the
+#   trigger; a verdict with no recorded author cannot satisfy that check.
+#
+# Returns 0 on success, 2 when refused, 1 on any other failure.
+#
+# REFUSAL: a `pause` or `stop` already recorded at this anchor is not
+# overwritable.  Last-write-wins made a verdict downgradable with no shell
+# and no filesystem access at all: the worker composes its own subagent
+# prompts, so it could dispatch a second "reviewer" instructed to emit
+# `continue` and overwrite an inconvenient `stop` — routing around the
+# PreToolUse denial the next slice adds, from inside the model's ordinary
+# capabilities.  The anchor is what makes refusing safe rather than sticky:
+# any real change to the tree, plan, or iteration moves the anchor, so a
+# stop only binds the exact state it was passed on.  Upgrades still work;
+# only the downgrade is refused.
 pursue_verdict_write() {
-  local goal_dir="$1" anchor="$2" json="$3" dir slug tmp
+  local goal_dir="$1" anchor="$2" json="$3" agent="${4-}" dir slug tmp existing
   dir="$goal_dir/verdicts"
   mkdir -p "$dir" 2>/dev/null || return 1
   slug="$(pursue_anchor_slug "$anchor")"
+
+  if [[ -r "$dir/$slug.json" ]]; then
+    existing="$(jq -r '.verdict // empty' "$dir/$slug.json" 2>/dev/null || printf '')"
+    case "$existing" in
+      pause|stop) return 2 ;;
+    esac
+  fi
+
   tmp="$(mktemp "$dir/$slug.json.XXXXXX" 2>/dev/null)" || return 1
   if printf '%s' "$json" \
        | jq -c --arg a "$anchor" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-           '. + {anchor: $a, recorded_at: $ts}' > "$tmp" 2>/dev/null; then
+           --arg ag "$agent" \
+           '. + {anchor: $a, recorded_at: $ts}
+              + (if $ag == "" then {} else {agent_id: $ag} end)' > "$tmp" 2>/dev/null; then
     mv "$tmp" "$dir/$slug.json" 2>/dev/null || { rm -f "$tmp"; return 1; }
   else
     rm -f "$tmp"; return 1

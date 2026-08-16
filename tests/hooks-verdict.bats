@@ -205,3 +205,60 @@ msg_with() {
   run pursue_verdict_extract "$text"
   [ "$output" = "" ]
 }
+
+# ---------------------------------------------------------------------------
+# A verdict cannot be downgraded at the same anchor
+# ---------------------------------------------------------------------------
+
+@test "a recorded stop is not overwritten by a later continue" {
+  pursue_verdict_write "$GOAL_DIR" 'a:1:0:1' '{"verdict":"stop","reason":"unsafe"}'
+  run pursue_verdict_write "$GOAL_DIR" 'a:1:0:1' '{"verdict":"continue","reason":"looks fine to me"}'
+  [ "$status" -ne 0 ]
+  slug="$(pursue_anchor_slug 'a:1:0:1')"
+  run jq -r '.verdict' "$GOAL_DIR/verdicts/$slug.json"
+  [ "$output" = "stop" ]
+}
+
+@test "a recorded pause is not overwritten by a later continue" {
+  pursue_verdict_write "$GOAL_DIR" 'a:1:0:1' '{"verdict":"pause","reason":"ask the operator"}'
+  run pursue_verdict_write "$GOAL_DIR" 'a:1:0:1' '{"verdict":"continue","reason":"looks fine to me"}'
+  [ "$status" -ne 0 ]
+  slug="$(pursue_anchor_slug 'a:1:0:1')"
+  run jq -r '.verdict' "$GOAL_DIR/verdicts/$slug.json"
+  [ "$output" = "pause" ]
+}
+
+@test "a recorded continue is upgraded by a later stop" {
+  pursue_verdict_write "$GOAL_DIR" 'a:1:0:1' '{"verdict":"continue","reason":"looks fine to me"}'
+  run pursue_verdict_write "$GOAL_DIR" 'a:1:0:1' '{"verdict":"stop","reason":"unsafe"}'
+  [ "$status" -eq 0 ]
+  slug="$(pursue_anchor_slug 'a:1:0:1')"
+  run jq -r '.verdict' "$GOAL_DIR/verdicts/$slug.json"
+  [ "$output" = "stop" ]
+}
+
+@test "pursue_verdict_write records the reviewer's agent_id" {
+  pursue_verdict_write "$GOAL_DIR" 'a:1:0:1' '{"verdict":"continue","reason":"ok"}' 'agt_7f3'
+  slug="$(pursue_anchor_slug 'a:1:0:1')"
+  run jq -r '.agent_id' "$GOAL_DIR/verdicts/$slug.json"
+  [ "$output" = "agt_7f3" ]
+}
+
+@test "subagent-stop refuses a second reviewer downgrading a stop" {
+  anchor="$(pursue_anchor "$PROJ" "$GOAL_DIR")"
+  slug="$(pursue_anchor_slug "$anchor")"
+  stop_payload="$(jq -cn --arg c "$PROJ" --arg g "agt_watchdog" --arg m "$(msg_with '{"verdict":"stop","reason":"acceptance criteria unmet"}')" \
+    '{session_id:"s1", cwd:$c, hook_event_name:"SubagentStop", agent_id:$g, last_assistant_message:$m}')"
+  cont_payload="$(jq -cn --arg c "$PROJ" --arg g "agt_friendly" --arg m "$(msg_with '{"verdict":"continue","reason":"all good, carry on"}')" \
+    '{session_id:"s1", cwd:$c, hook_event_name:"SubagentStop", agent_id:$g, last_assistant_message:$m}')"
+
+  printf '%s' "$stop_payload" | "$REPO_ROOT/hooks/subagent-stop.sh" >/dev/null
+  printf '%s' "$cont_payload" | "$REPO_ROOT/hooks/subagent-stop.sh" >/dev/null
+
+  run jq -r '.verdict' "$GOAL_DIR/verdicts/$slug.json"
+  [ "$output" = "stop" ]
+  run jq -r '.agent_id' "$GOAL_DIR/verdicts/$slug.json"
+  [ "$output" = "agt_watchdog" ]
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' | tr '\n' ' '"
+  [ "$output" = "verdict-recorded verdict-rejected " ]
+}
