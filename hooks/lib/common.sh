@@ -78,3 +78,44 @@ pursue_anchor() {
     "$(pursue_plan_field "$2" active_step)" \
     "$(pursue_plan_field "$2" iteration)"
 }
+
+# ---------------------------------------------------------------------------
+# Hook payload I/O
+#
+# Both Claude Code and Codex deliver the same payload shape on stdin and
+# read the same result shape from stdout (EP-0001 "Hook contract").
+# ---------------------------------------------------------------------------
+
+PURSUE_PAYLOAD="${PURSUE_PAYLOAD:-}"
+
+pursue_have_jq() { command -v jq >/dev/null 2>&1; }
+
+# Slurp the hook payload from stdin exactly once.
+pursue_read_payload() { PURSUE_PAYLOAD="$(cat)"; }
+
+# Print a top-level string field from the payload, or nothing.  Malformed
+# JSON yields empty rather than an error: hooks fail open.
+pursue_payload_field() {
+  printf '%s' "$PURSUE_PAYLOAD" \
+    | jq -r --arg f "$1" '.[$f] // empty' 2>/dev/null \
+    || true
+}
+
+# The "we have nothing to say" result.  Valid, inert, always exit 0.
+pursue_emit_noop() { printf '{}\n'; }
+
+# Inject context into the model's next turn.  Deliberately emits no
+# `decision` and no `continue`: SessionStart/PreCompact are injection-only,
+# the gate is a separate hook.
+pursue_emit_context() {
+  jq -n --arg e "$1" --arg c "$2" \
+    '{hookSpecificOutput: {hookEventName: $e, additionalContext: $c}}'
+}
+
+# Record that a hook actually ran.  This is what makes "hooks silently not
+# running" detectable after the fact (EP-0001 Failure modes) — without it,
+# an unenforced pursuit looks exactly like an enforced quiet one.
+pursue_heartbeat() {
+  printf '{"ts":"%s","event":"%s","kind":"heartbeat"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" >> "$1/triggers.jsonl" 2>/dev/null || true
+}

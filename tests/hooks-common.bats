@@ -80,3 +80,52 @@ teardown() { rm -rf "$TMP"; }
   [ "$status" -eq 0 ]
   [[ "$output" == *:3:1:7 ]]
 }
+
+@test "pursue_payload_field extracts top-level fields" {
+  PURSUE_PAYLOAD='{"cwd":"/tmp/x","hook_event_name":"SessionStart"}'
+  run pursue_payload_field cwd
+  [ "$output" = "/tmp/x" ]
+  run pursue_payload_field hook_event_name
+  [ "$output" = "SessionStart" ]
+}
+
+@test "pursue_payload_field is empty for a missing field" {
+  PURSUE_PAYLOAD='{"cwd":"/tmp/x"}'
+  run pursue_payload_field nope
+  [ "$output" = "" ]
+}
+
+@test "pursue_payload_field is empty for malformed JSON" {
+  PURSUE_PAYLOAD='not json at all'
+  run pursue_payload_field cwd
+  [ "$status" -eq 0 ]
+  [ "$output" = "" ]
+}
+
+@test "pursue_emit_noop emits an empty JSON object" {
+  run pursue_emit_noop
+  [ "$output" = "{}" ]
+}
+
+@test "pursue_emit_context emits valid additionalContext JSON" {
+  run pursue_emit_context SessionStart "line one
+line \"two\""
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.hookEventName == "SessionStart"'
+  echo "$output" | jq -e '.hookSpecificOutput.additionalContext | contains("line one")'
+  echo "$output" | jq -e '.hookSpecificOutput.additionalContext | contains("line \"two\"")'
+}
+
+@test "pursue_emit_context emits no decision or continue key" {
+  run pursue_emit_context SessionStart "x"
+  echo "$output" | jq -e 'has("decision") | not'
+  echo "$output" | jq -e 'has("continue") | not'
+}
+
+@test "pursue_heartbeat appends one JSON line per call" {
+  pursue_heartbeat "$GOAL_DIR" SessionStart
+  pursue_heartbeat "$GOAL_DIR" PreCompact
+  [ "$(wc -l < "$GOAL_DIR/triggers.jsonl")" -eq 2 ]
+  run jq -r -s '.[1].event' "$GOAL_DIR/triggers.jsonl"
+  [ "$output" = "PreCompact" ]
+}
