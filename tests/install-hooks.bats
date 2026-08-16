@@ -108,3 +108,67 @@ JSON
   run jq -e . "$SETTINGS"
   [ "$status" -eq 0 ]
 }
+
+@test "--hooks registers hooks for codex in hooks.json" {
+  mkdir -p "$FAKE_HOME/.codex"
+  run "$REPO_ROOT/install.sh" --hooks
+  [ "$status" -eq 0 ]
+  hj="$FAKE_HOME/.codex/hooks.json"
+  [ -f "$hj" ]
+  jq -e '.hooks.SessionStart[0].hooks[0].command | contains("session-start.sh")' "$hj"
+  jq -e '.hooks.PreCompact[0].hooks[0].command | contains("pre-compact.sh")' "$hj"
+}
+
+@test "--hooks enables the codex hooks feature" {
+  mkdir -p "$FAKE_HOME/.codex"
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  grep -q '^hooks = true' "$FAKE_HOME/.codex/config.toml"
+  grep -q '^\[features\]' "$FAKE_HOME/.codex/config.toml"
+}
+
+@test "--hooks does not duplicate an existing features.hooks setting" {
+  mkdir -p "$FAKE_HOME/.codex"
+  printf '[features]\nhooks = true\n' > "$FAKE_HOME/.codex/config.toml"
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  [ "$(grep -c '^\[features\]' "$FAKE_HOME/.codex/config.toml")" -eq 1 ]
+}
+
+@test "--hooks never writes a trusted_hash" {
+  mkdir -p "$FAKE_HOME/.codex"
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  ! grep -q 'trusted_hash' "$FAKE_HOME/.codex/hooks.json"
+  ! grep -q 'trusted_hash' "$FAKE_HOME/.codex/config.toml"
+}
+
+@test "--hooks tells the user to expect a codex trust prompt" {
+  mkdir -p "$FAKE_HOME/.codex"
+  run "$REPO_ROOT/install.sh" --hooks
+  [[ "$output" == *"trust"* ]]
+}
+
+@test "--hooks preserves a foreign codex hook" {
+  mkdir -p "$FAKE_HOME/.codex"
+  cat > "$FAKE_HOME/.codex/hooks.json" <<'JSON'
+{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/opt/mine.sh","timeout":10}]}]}}
+JSON
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  jq -e '[.hooks.SessionStart[].hooks[].command] | any(. == "/opt/mine.sh")' "$FAKE_HOME/.codex/hooks.json"
+}
+
+@test "--hooks is idempotent for codex" {
+  mkdir -p "$FAKE_HOME/.codex"
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  run jq '[.hooks.SessionStart[].hooks[] | select(.command | contains("session-start.sh"))] | length' \
+    "$FAKE_HOME/.codex/hooks.json"
+  [ "$output" = "1" ]
+}
+
+@test "--no-hooks removes codex entries" {
+  mkdir -p "$FAKE_HOME/.codex"
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  "$REPO_ROOT/install.sh" --no-hooks >/dev/null
+  run jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("session-start.sh"))] | length' \
+    "$FAKE_HOME/.codex/hooks.json"
+  [ "$output" = "0" ]
+}

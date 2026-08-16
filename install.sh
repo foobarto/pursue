@@ -532,6 +532,101 @@ uninstall_hooks_claude() {
   echo "done: removed claude-code hooks from $settings"
 }
 
+# Codex reads ~/.codex/hooks.json and gates the whole surface behind
+# [features] hooks = true in config.toml.
+#
+# Trust is Codex's own: it records trusted_hash under [hooks.state] in
+# config.toml on first run, after prompting.  We deliberately never write
+# that — an installer that pre-seeds trust for its own hooks defeats the
+# mechanism it is registering with.
+install_hooks_codex() {
+  local hooks_json="${CLI_PARENT[codex]}/hooks.json"
+  local config_toml="${CLI_PARENT[codex]}/config.toml"
+  local event script tmp
+
+  if (( dry_run )); then
+    while read -r event script; do
+      echo "plan: register $event -> $script in $hooks_json"
+    done < <(pursue_hook_entries)
+    echo "plan: ensure [features] hooks = true in $config_toml"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$hooks_json")" || { echo "error: mkdir $(dirname "$hooks_json")" >&2; exit 3; }
+  [[ -f "$hooks_json" ]] || echo '{}' > "$hooks_json"
+
+  while read -r event script; do
+    tmp="$(mktemp "${hooks_json}.XXXXXX")"
+    jq --arg e "$event" --arg c "$script" '
+      .hooks //= {}
+      | .hooks[$e] //= []
+      | .hooks[$e] = (
+          [ .hooks[$e][]
+            | .hooks = [ .hooks[]? | select(.command != $c) ]
+            | select((.hooks | length) > 0)
+          ]
+          + [ { hooks: [ { type: "command", command: $c, timeout: 10 } ] } ]
+        )
+    ' "$hooks_json" > "$tmp" || { echo "error: failed to update $hooks_json" >&2; rm -f "$tmp"; exit 3; }
+    if [[ -f "$hooks_json" ]]; then
+      chmod --reference="$hooks_json" "$tmp" 2>/dev/null || true
+    fi
+    mv "$tmp" "$hooks_json"
+  done < <(pursue_hook_entries)
+
+  ensure_codex_hooks_feature "$config_toml"
+
+  echo "done: codex hooks -> $hooks_json"
+  echo "note: Codex will ask you to trust these hooks on first run."
+  echo "      It records that decision itself under [hooks.state] in config.toml."
+}
+
+# Append [features] hooks = true if it is not already set.  Deliberately
+# minimal: we never rewrite the user's TOML, only append a section when the
+# key is absent entirely.
+ensure_codex_hooks_feature() {
+  local config_toml="$1"
+  [[ -f "$config_toml" ]] || : > "$config_toml"
+  if grep -qE '^[[:space:]]*hooks[[:space:]]*=[[:space:]]*true' "$config_toml"; then
+    return 0
+  fi
+  if grep -qE '^\[features\]' "$config_toml"; then
+    echo "warn: [features] exists in $config_toml but hooks is not true" >&2
+    echo "      add 'hooks = true' under [features] to enable pursue's hooks" >&2
+    return 0
+  fi
+  printf '\n[features]\nhooks = true\n' >> "$config_toml"
+}
+
+uninstall_hooks_codex() {
+  local hooks_json="${CLI_PARENT[codex]}/hooks.json"
+  local event script tmp
+  [[ -f "$hooks_json" ]] || return 0
+
+  if (( dry_run )); then
+    echo "plan: remove pursue hooks from $hooks_json"
+    return 0
+  fi
+
+  while read -r event script; do
+    tmp="$(mktemp "${hooks_json}.XXXXXX")"
+    jq --arg e "$event" --arg c "$script" '
+      if (.hooks[$e]? | type) == "array" then
+        .hooks[$e] = [ .hooks[$e][]
+          | .hooks = [ .hooks[]? | select(.command != $c) ]
+          | select((.hooks | length) > 0) ]
+      else . end
+    ' "$hooks_json" > "$tmp" || { rm -f "$tmp"; exit 3; }
+    if [[ -f "$hooks_json" ]]; then
+      chmod --reference="$hooks_json" "$tmp" 2>/dev/null || true
+    fi
+    mv "$tmp" "$hooks_json"
+  done < <(pursue_hook_entries)
+
+  echo "done: removed codex hooks from $hooks_json"
+  echo "note: stale [hooks.state] entries may remain in config.toml; Codex prunes them."
+}
+
 # ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
@@ -552,6 +647,7 @@ if (( do_hooks )); then
   for cli in "${detected_clis[@]}"; do
     case "$cli" in
       claude-code) install_hooks_claude ;;
+      codex)       install_hooks_codex ;;
     esac
   done
 fi
@@ -561,6 +657,7 @@ if (( undo_hooks )); then
   for cli in "${detected_clis[@]}"; do
     case "$cli" in
       claude-code) uninstall_hooks_claude ;;
+      codex)       uninstall_hooks_codex ;;
     esac
   done
 fi

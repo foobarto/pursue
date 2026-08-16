@@ -54,6 +54,33 @@ your system (Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Cursor):
 ./install.sh --copy
 ```
 
+### Hooks (Claude Code and Codex)
+
+Without hooks, `/pursue` is instructions the agent may or may not follow.
+With them, the harness enforces the loop: the contract is re-injected into
+every new session, and (from the next release) a pursuit cannot end while
+acceptance criteria are unmet.
+
+```sh
+./install.sh --hooks      # register the lifecycle hooks
+./install.sh --no-hooks   # remove them again
+```
+
+Hooks are opt-in — a plain `./install.sh` never touches your harness config.
+Registration merges into your existing config and leaves unrelated hooks
+alone. `jq` is required.
+
+**Claude Code** picks them up immediately. **Codex** additionally needs
+`[features] hooks = true` (the installer adds it) and will ask you to trust
+each hook on first run — it records that decision itself under
+`[hooks.state]` in `config.toml`. The installer deliberately does not
+pre-seed that trust.
+
+**Gemini CLI, Copilot CLI, and Cursor have no hook surface.** There `/pursue`
+still works, but it loses its teeth: enforcement falls back to the agent
+following instructions. See
+[EP-0001](./docs/eps/0001-hook-enforced-pursuit.md).
+
 Because `SKILL.md` lives at the repo root, the installer links the repo
 directory itself in as the skill (`~/.claude/skills/pursue/`). The CLI
 reads `SKILL.md` and ignores the sibling repo files. Equivalently, you can
