@@ -689,3 +689,15 @@ pt_payload() {
   [ "$status" -eq 0 ]
   [ "$output" = "" ]
 }
+
+@test "edit_revert_churn does not fire on repeated no-op edits" {
+  init_repo
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  PURSUE_PAYLOAD="$(edit_payload "$PROJ/a.txt")"
+  printf 'two\n' > "$PROJ/a.txt"
+  for _ in 1 2 3 4 5; do
+    state="$(pursue_detect_churn "$GOAL_DIR" "$state" "$PROJ")"
+  done
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c edit_revert_churn || true"
+  [ "$output" = "0" ]
+}

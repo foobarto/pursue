@@ -290,7 +290,7 @@ PURSUE_SCOPE_MAX_FILES="${PURSUE_SCOPE_MAX_FILES:-15}"
 PURSUE_CHURN_HISTORY="${PURSUE_CHURN_HISTORY:-6}"
 
 pursue_detect_churn() {
-  local goal_dir="$1" state="$2" root="$3" tool path hash seen
+  local goal_dir="$1" state="$2" root="$3" tool path hash prev seen
   tool="$(pursue_payload_field tool_name)"
   case "$tool" in
     Edit|Write|MultiEdit|NotebookEdit) ;;
@@ -305,6 +305,16 @@ pursue_detect_churn() {
   [[ -n "$path" && -r "$path" ]] || { printf '%s\n' "$state"; return 0; }
   hash="$(sha256sum "$path" 2>/dev/null | cut -c1-12)"
   [[ -n "$hash" ]] || { printf '%s\n' "$state"; return 0; }
+
+  # A match against the *immediately preceding* hash is not a revert, it is
+  # an edit that changed nothing — a successful no-op write, which the edit
+  # tools report exactly like any other success.  Five identical Writes used
+  # to produce four edit_revert_churn triggers.  Churn means returning to an
+  # older, non-adjacent content; a no-op is neither recorded nor counted, so
+  # the history keeps describing distinct states.
+  prev="$(printf '%s' "$state" \
+    | jq -r --arg p "$path" '((.files[$p] // []) | last) // ""' 2>/dev/null || printf '')"
+  [[ "$hash" != "$prev" ]] || { printf '%s\n' "$state"; return 0; }
 
   seen="$(printf '%s' "$state" \
     | jq -r --arg p "$path" --arg h "$hash" \
