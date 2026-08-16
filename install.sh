@@ -448,6 +448,13 @@ install_skill_dir() {
 # differs.  Both are keyed on the absolute script path, which is also how we
 # recognise our own entries on re-install and on --no-hooks.  Nothing else in
 # either config is touched.
+#
+# The stored `command` is a shell command line, not a path — both harnesses
+# hand it to a shell — so it is written through jq's @sh.  Without that, a
+# checkout under a directory with a space in its name registers a command
+# that resolves to the first word and the hook never runs.  @sh is applied on
+# both the write and the match, so the string --hooks writes is exactly the
+# string --no-hooks looks for.
 # ---------------------------------------------------------------------------
 
 # Emit "<Event> <absolute-script-path>" per registered hook.
@@ -503,15 +510,16 @@ install_hooks_claude() {
   while read -r event script; do
     tmp="$(mktemp "${target}.XXXXXX")"
     jq --arg e "$event" --arg c "$script" '
-      .hooks //= {}
+      ($c | @sh) as $q
+      | .hooks //= {}
       | .hooks[$e] //= []
       # Drop any previous registration of this exact script, then append once.
       | .hooks[$e] = (
           [ .hooks[$e][]
-            | .hooks = [ .hooks[]? | select(.command != $c) ]
+            | .hooks = [ .hooks[]? | select(.command != $q) ]
             | select((.hooks | length) > 0)
           ]
-          + [ { hooks: [ { type: "command", command: $c, timeout: 10 } ] } ]
+          + [ { hooks: [ { type: "command", command: $q, timeout: 10 } ] } ]
         )
     ' "$target" > "$tmp" || { echo "error: failed to update $settings" >&2; rm -f "$tmp"; exit 3; }
     if [[ -f "$target" ]]; then
@@ -539,11 +547,12 @@ uninstall_hooks_claude() {
   while read -r event script; do
     tmp="$(mktemp "${target}.XXXXXX")"
     jq --arg e "$event" --arg c "$script" '
-      if (.hooks[$e]? | type) == "array" then
-        .hooks[$e] = [ .hooks[$e][]
-          | .hooks = [ .hooks[]? | select(.command != $c) ]
-          | select((.hooks | length) > 0) ]
-      else . end
+      ($c | @sh) as $q
+      | if (.hooks[$e]? | type) == "array" then
+          .hooks[$e] = [ .hooks[$e][]
+            | .hooks = [ .hooks[]? | select(.command != $q) ]
+            | select((.hooks | length) > 0) ]
+        else . end
     ' "$target" > "$tmp" || { rm -f "$tmp"; exit 3; }
     if [[ -f "$target" ]]; then
       chmod --reference="$target" "$tmp" 2>/dev/null || true
@@ -581,14 +590,15 @@ install_hooks_codex() {
   while read -r event script; do
     tmp="$(mktemp "${target}.XXXXXX")"
     jq --arg e "$event" --arg c "$script" '
-      .hooks //= {}
+      ($c | @sh) as $q
+      | .hooks //= {}
       | .hooks[$e] //= []
       | .hooks[$e] = (
           [ .hooks[$e][]
-            | .hooks = [ .hooks[]? | select(.command != $c) ]
+            | .hooks = [ .hooks[]? | select(.command != $q) ]
             | select((.hooks | length) > 0)
           ]
-          + [ { hooks: [ { type: "command", command: $c, timeout: 10 } ] } ]
+          + [ { hooks: [ { type: "command", command: $q, timeout: 10 } ] } ]
         )
     ' "$target" > "$tmp" || { echo "error: failed to update $hooks_json" >&2; rm -f "$tmp"; exit 3; }
     if [[ -f "$target" ]]; then
@@ -693,11 +703,12 @@ uninstall_hooks_codex() {
   while read -r event script; do
     tmp="$(mktemp "${target}.XXXXXX")"
     jq --arg e "$event" --arg c "$script" '
-      if (.hooks[$e]? | type) == "array" then
-        .hooks[$e] = [ .hooks[$e][]
-          | .hooks = [ .hooks[]? | select(.command != $c) ]
-          | select((.hooks | length) > 0) ]
-      else . end
+      ($c | @sh) as $q
+      | if (.hooks[$e]? | type) == "array" then
+          .hooks[$e] = [ .hooks[$e][]
+            | .hooks = [ .hooks[]? | select(.command != $q) ]
+            | select((.hooks | length) > 0) ]
+        else . end
     ' "$target" > "$tmp" || { rm -f "$tmp"; exit 3; }
     if [[ -f "$target" ]]; then
       chmod --reference="$target" "$tmp" 2>/dev/null || true

@@ -27,13 +27,54 @@ teardown() { rm -rf "$FAKE_HOME"; }
   jq -e '.hooks.SessionStart[0].hooks[0].type == "command"' "$SETTINGS"
 }
 
-@test "--hooks registers an absolute path that exists" {
+# The registered command is a shell word, not a bare path: both harnesses
+# run it through a shell.  Truncating at the first space to find "the
+# script" would hide exactly the bug this asserts against, so unwrap the
+# whole command the way a shell does and check that.
+@test "--hooks registers a command that resolves to an executable script" {
   mkdir -p "$FAKE_HOME/.claude"
   "$REPO_ROOT/install.sh" --hooks >/dev/null
   cmd="$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$SETTINGS")"
-  [[ "$cmd" == /* ]]
-  script="${cmd%% *}"
+  eval "script=$cmd"
+  [[ "$script" == /* ]]
   [ -x "$script" ]
+}
+
+# Install from a directory whose name contains a space.  An unquoted command
+# string becomes `/tmp/.../my` plus a stray argument once the harness hands
+# it to a shell, so the hook never runs.
+@test "--hooks registers a runnable command when the repo path contains a space" {
+  spaced="$FAKE_HOME/my repo"
+  mkdir -p "$spaced" "$FAKE_HOME/.claude"
+  cp "$REPO_ROOT/install.sh" "$REPO_ROOT/SKILL.md" "$spaced/"
+  cp -r "$REPO_ROOT/hooks" "$spaced/"
+
+  "$spaced/install.sh" --hooks >/dev/null
+  cmd="$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$SETTINGS")"
+  [[ "$cmd" == *"my repo"* ]]
+
+  # Run it exactly as the harness would: through a shell, as a command line.
+  run bash -c "printf '{}' | $cmd"
+  [ "$status" -eq 0 ]
+  [ "$output" = "{}" ]
+}
+
+# Quoting has to round-trip: --no-hooks matches entries by exact command
+# string, so whatever --hooks writes is what --no-hooks must look for.
+@test "--hooks is idempotent and --no-hooks removes it when the path contains a space" {
+  spaced="$FAKE_HOME/my repo"
+  mkdir -p "$spaced" "$FAKE_HOME/.claude"
+  cp "$REPO_ROOT/install.sh" "$REPO_ROOT/SKILL.md" "$spaced/"
+  cp -r "$REPO_ROOT/hooks" "$spaced/"
+
+  "$spaced/install.sh" --hooks >/dev/null
+  "$spaced/install.sh" --hooks >/dev/null
+  run jq '[.hooks.SessionStart[].hooks[] | select(.command | contains("session-start.sh"))] | length' "$SETTINGS"
+  [ "$output" = "1" ]
+
+  "$spaced/install.sh" --no-hooks >/dev/null
+  run jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("session-start.sh"))] | length' "$SETTINGS"
+  [ "$output" = "0" ]
 }
 
 @test "--hooks preserves unrelated settings keys" {
