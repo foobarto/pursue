@@ -141,3 +141,65 @@ pursue_detect_count() {
     | jq -r --arg c "$2" --arg k "$3" '(.[$c][$k] // 0)' 2>/dev/null \
     || printf '0\n'
 }
+
+# ---------------------------------------------------------------------------
+# Triggers
+# ---------------------------------------------------------------------------
+
+PURSUE_REPEAT_THRESHOLD="${PURSUE_REPEAT_THRESHOLD:-3}"
+# Stricter than repeat: same error *and* same arguments means the worker has
+# stopped changing anything, which is a much stronger signal than the same
+# error arrived at two different ways.
+PURSUE_THRASH_THRESHOLD="${PURSUE_THRASH_THRESHOLD:-2}"
+
+# Append one trigger to triggers.jsonl.  Shares the file with slice 1's
+# heartbeats; `kind` is what tells them apart.  Detail is caller-supplied
+# compact JSON, embedded as an object rather than a string so the record
+# stays queryable.
+pursue_detect_trigger() {
+  local detail line
+  # Assigned to a local first: `${3:-{}}` is ambiguous to the parser
+  # because the default value's own brace closes the expansion.
+  detail="$3"
+  [[ -n "$detail" ]] || detail='{}'
+  line="$(jq -cn --arg n "$2" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson d "$detail" \
+            '{ts: $ts, kind: "trigger", name: $n, detail: $d}' 2>/dev/null)" || return 0
+  printf '%s\n' "$line" >> "$1/triggers.jsonl" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
+# Failure detectors
+#
+# Both fire when the count *reaches* the threshold, not above it, so a
+# persistent failure produces one trigger rather than one per call.  In
+# Plan 3 each trigger demands a fresh review; firing per call would turn a
+# stuck loop into a review storm.
+# ---------------------------------------------------------------------------
+
+pursue_detect_failures() {
+  local goal_dir="$1" state="$2" fp digest pair n
+  fp="$(pursue_error_fingerprint)"
+  # Empty fingerprint means the call succeeded — nothing to count.
+  [[ -n "$fp" ]] || { printf '%s\n' "$state"; return 0; }
+
+  digest="$(pursue_input_digest)"
+  pair="${fp}-${digest}"
+
+  state="$(pursue_detect_bump "$state" errors "$fp")"
+  n="$(pursue_detect_count "$state" errors "$fp")"
+  if [[ "$n" == "$PURSUE_REPEAT_THRESHOLD" ]]; then
+    pursue_detect_trigger "$goal_dir" repeated_failure \
+      "$(jq -cn --arg f "$fp" --argjson c "$n" '{fingerprint: $f, count: $c}')"
+  fi
+
+  state="$(pursue_detect_bump "$state" pairs "$pair")"
+  n="$(pursue_detect_count "$state" pairs "$pair")"
+  if [[ "$n" == "$PURSUE_THRASH_THRESHOLD" ]]; then
+    pursue_detect_trigger "$goal_dir" retry_thrash \
+      "$(jq -cn --arg f "$fp" --arg d "$digest" --argjson c "$n" \
+           '{fingerprint: $f, input_digest: $d, count: $c}')"
+  fi
+
+  printf '%s\n' "$state"
+}

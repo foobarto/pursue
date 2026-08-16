@@ -194,3 +194,118 @@ teardown() { rm -rf "$TMP"; }
   [ "$output" = "0" ]
   [[ ! -f "$GOAL_DIR/detect-state.json" ]]
 }
+
+# ---------------------------------------------------------------------------
+# Triggers
+# ---------------------------------------------------------------------------
+
+fail_payload() { printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"tool_response":{"error":"%s"}}' "$1" "$2"; }
+
+@test "pursue_detect_trigger appends a trigger line" {
+  pursue_detect_trigger "$GOAL_DIR" repeated_failure '{"count":3}'
+  run jq -r '.kind' "$GOAL_DIR/triggers.jsonl"
+  [ "$output" = "trigger" ]
+  run jq -r '.name' "$GOAL_DIR/triggers.jsonl"
+  [ "$output" = "repeated_failure" ]
+}
+
+@test "trigger lines are distinguishable from slice 1 heartbeats" {
+  pursue_heartbeat "$GOAL_DIR" SessionStart heartbeat
+  pursue_detect_trigger "$GOAL_DIR" repeated_failure '{"count":3}'
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' | wc -l"
+  [ "$output" = "1" ]
+  run bash -c "jq -r 'select(.kind==\"heartbeat\") | .event' '$GOAL_DIR/triggers.jsonl' | wc -l"
+  [ "$output" = "1" ]
+}
+
+@test "pursue_detect_trigger emits valid JSON per line" {
+  pursue_detect_trigger "$GOAL_DIR" scope_growth '{"paths":12}'
+  run jq -e . "$GOAL_DIR/triggers.jsonl"
+  [ "$status" -eq 0 ]
+}
+
+@test "repeated_failure fires on the third distinct-argument failure" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  for c in a b c; do
+    PURSUE_PAYLOAD="$(fail_payload "$c" "npm not found")"
+    state="$(pursue_detect_failures "$GOAL_DIR" "$state")"
+  done
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c repeated_failure"
+  [ "$output" = "1" ]
+}
+
+@test "repeated_failure does not fire on the second failure" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  for c in a b; do
+    PURSUE_PAYLOAD="$(fail_payload "$c" "npm not found")"
+    state="$(pursue_detect_failures "$GOAL_DIR" "$state")"
+  done
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c repeated_failure || true"
+  [ "$output" = "0" ]
+}
+
+@test "repeated_failure fires once, not on every later failure" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  for c in a b c d e; do
+    PURSUE_PAYLOAD="$(fail_payload "$c" "npm not found")"
+    state="$(pursue_detect_failures "$GOAL_DIR" "$state")"
+  done
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c repeated_failure"
+  [ "$output" = "1" ]
+}
+
+@test "retry_thrash fires when the same command repeats the same error" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  for _ in 1 2; do
+    PURSUE_PAYLOAD="$(fail_payload "npm test" "npm not found")"
+    state="$(pursue_detect_failures "$GOAL_DIR" "$state")"
+  done
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c retry_thrash"
+  [ "$output" = "1" ]
+}
+
+@test "retry_thrash does not fire when the worker changes tactics" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  for c in "npm test" "yarn test" "pnpm test"; do
+    PURSUE_PAYLOAD="$(fail_payload "$c" "not found")"
+    state="$(pursue_detect_failures "$GOAL_DIR" "$state")"
+  done
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c retry_thrash || true"
+  [ "$output" = "0" ]
+}
+
+@test "successful calls never fire a failure detector" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  for _ in 1 2 3 4; do
+    PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"go test ./..."},"tool_response":{"stdout":"ok"}}'
+    state="$(pursue_detect_failures "$GOAL_DIR" "$state")"
+  done
+  [ ! -s "$GOAL_DIR/triggers.jsonl" ] || {
+    run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | wc -l"
+    [ "$output" = "0" ]
+  }
+}
+
+real_fail_payload() {
+  printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"tool_response":"Error: Exit code 127\\nbash: %s: command not found"}' "$1" "$1"
+}
+
+@test "retry_thrash fires on the real string-shaped failure response" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  for _ in 1 2; do
+    PURSUE_PAYLOAD="$(real_fail_payload 'npm test')"
+    state="$(pursue_detect_failures "$GOAL_DIR" "$state")"
+  done
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c retry_thrash"
+  [ "$output" = "1" ]
+}
+
+@test "a real successful object response never fires a failure detector" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  for _ in 1 2 3 4; do
+    PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"go test ./..."},"tool_response":{"stdout":"ok","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false}}'
+    state="$(pursue_detect_failures "$GOAL_DIR" "$state")"
+  done
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | wc -l"
+  [ "$output" = "0" ]
+}
