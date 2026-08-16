@@ -481,7 +481,7 @@ install_hooks_claude() {
   [[ -f "$settings" ]] || echo '{}' > "$settings"
 
   while read -r event script; do
-    tmp="$(mktemp)"
+    tmp="$(mktemp "${settings}.XXXXXX")"
     jq --arg e "$event" --arg c "$script" '
       .hooks //= {}
       | .hooks[$e] //= []
@@ -494,6 +494,9 @@ install_hooks_claude() {
           + [ { hooks: [ { type: "command", command: $c, timeout: 10 } ] } ]
         )
     ' "$settings" > "$tmp" || { echo "error: failed to update $settings" >&2; rm -f "$tmp"; exit 3; }
+    if [[ -f "$settings" ]]; then
+      chmod --reference="$settings" "$tmp" 2>/dev/null || true
+    fi
     mv "$tmp" "$settings"
   done < <(pursue_hook_entries)
 
@@ -512,7 +515,7 @@ uninstall_hooks_claude() {
   fi
 
   while read -r event script; do
-    tmp="$(mktemp)"
+    tmp="$(mktemp "${settings}.XXXXXX")"
     jq --arg e "$event" --arg c "$script" '
       if (.hooks[$e]? | type) == "array" then
         .hooks[$e] = [ .hooks[$e][]
@@ -520,6 +523,9 @@ uninstall_hooks_claude() {
           | select((.hooks | length) > 0) ]
       else . end
     ' "$settings" > "$tmp" || { rm -f "$tmp"; exit 3; }
+    if [[ -f "$settings" ]]; then
+      chmod --reference="$settings" "$tmp" 2>/dev/null || true
+    fi
     mv "$tmp" "$settings"
   done < <(pursue_hook_entries)
 

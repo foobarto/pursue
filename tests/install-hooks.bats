@@ -46,6 +46,16 @@ teardown() { rm -rf "$FAKE_HOME"; }
   jq -e '.hooks.SessionStart' "$SETTINGS"
 }
 
+@test "--no-hooks preserves unrelated settings keys" {
+  mkdir -p "$FAKE_HOME/.claude"
+  printf '{"model":"opus","env":{"FOO":"bar"}}' > "$SETTINGS"
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  run "$REPO_ROOT/install.sh" --no-hooks
+  [ "$status" -eq 0 ]
+  jq -e '.model == "opus"' "$SETTINGS"
+  jq -e '.env.FOO == "bar"' "$SETTINGS"
+}
+
 @test "--hooks preserves a foreign hook on the same event" {
   mkdir -p "$FAKE_HOME/.claude"
   cat > "$SETTINGS" <<'JSON'
