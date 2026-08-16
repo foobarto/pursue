@@ -420,3 +420,10 @@ JSON
   run jq '[.hooks.PostToolUse[]?.hooks[]? | select(.command | contains("post-tool-use.sh"))] | length' "$SETTINGS"
   [ "$output" = "0" ]
 }
+
+@test "--hooks registers SubagentStop for both harnesses" {
+  mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/.codex"
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  jq -e '.hooks.SubagentStop[0].hooks[0].command | contains("subagent-stop.sh")' "$SETTINGS"
+  jq -e '.hooks.SubagentStop[0].hooks[0].command | contains("subagent-stop.sh")' "$FAKE_HOME/.codex/hooks.json"
+}
