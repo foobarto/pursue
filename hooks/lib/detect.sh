@@ -104,7 +104,15 @@ PURSUE_DETECT_MAX_KEYS="${PURSUE_DETECT_MAX_KEYS:-200}"
 pursue_is_uint() { [[ "${1-}" =~ ^[0-9]+$ ]]; }
 
 # How long to wait for the state lock before giving up on this call.
-PURSUE_DETECT_LOCK_WAIT="${PURSUE_DETECT_LOCK_WAIT:-5}"
+#
+# One second, not five.  pursue_detect_locked below states the asymmetry — a
+# missed detection costs one signal out of many, a blocked hook costs the
+# operator a wedged tool call — and then five seconds contradicted it, on a
+# hook that runs after *every* tool call.  Measured against a held lock, the
+# hook stalled for 5.02s.  One second still absorbs the contention this lock
+# actually sees (a handful of parallel hooks each holding it for tens of
+# milliseconds) without ever being the thing the operator notices.
+PURSUE_DETECT_LOCK_WAIT="${PURSUE_DETECT_LOCK_WAIT:-1}"
 
 pursue_detect_state_path() { printf '%s/detect-state.json\n' "$1"; }
 pursue_detect_lock_path()  { printf '%s/detect-state.lock\n' "$1"; }
@@ -135,7 +143,7 @@ pursue_detect_lock_path()  { printf '%s/detect-state.lock\n' "$1"; }
 # quiet one.  install.sh names flock so the operator hears about it once, at
 # install time, rather than never.
 pursue_detect_locked() {
-  local goal_dir="$1" lock
+  local goal_dir="$1" lock wait
   shift
   if ! command -v flock >/dev/null 2>&1; then
     "$@"
@@ -151,8 +159,15 @@ pursue_detect_locked() {
   else
     [[ -w "$goal_dir" ]] || return 0
   fi
+  # A malformed override must not reach flock.  `flock -w abc` errors out,
+  # which reads here as "could not take the lock" and silently disables
+  # detection for the whole session — the same shape of silent failure as
+  # handing an unvalidated operand to arithmetic, and just as invisible.
+  # Fall back to the default rather than trusting it.
+  wait="$PURSUE_DETECT_LOCK_WAIT"
+  pursue_is_uint "$wait" || wait=1
   (
-    flock -w "$PURSUE_DETECT_LOCK_WAIT" 9 2>/dev/null || exit 0
+    flock -w "$wait" 9 2>/dev/null || exit 0
     "$@"
   ) 9>"$lock"
   return 0

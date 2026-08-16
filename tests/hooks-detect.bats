@@ -828,6 +828,41 @@ path_without() {
   [ "$output" = "1" ]
 }
 
+# ---------------------------------------------------------------------------
+# The lock wait is bounded, and a nonsense override does not disable detection
+# ---------------------------------------------------------------------------
+
+@test "a malformed lock wait still permits detection" {
+  payload="$(jq -cn --arg c "$PROJ" '{session_id:"s1",cwd:$c,hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:"npm test"},tool_response:"Error: npm not found"}')"
+  run bash -c "export PURSUE_DETECT_LOCK_WAIT=abc; printf '%s' '$payload' | '$REPO_ROOT/hooks/post-tool-use.sh'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "{}" ]
+  [ -f "$GOAL_DIR/detect-state.json" ]
+}
+
+# The number the operator actually pays for.  This hook runs after every tool
+# call, so the wait is a per-call worst case, not a one-off.
+@test "a held lock does not stall the hook for seconds" {
+  command -v flock >/dev/null 2>&1 || skip "no flock: nothing takes the lock here"
+  lock="$GOAL_DIR/detect-state.lock"
+  : > "$lock"
+  # 3>&- so bats does not wait on the holder.  Held far longer than any wait
+  # we are willing to accept, so the hook must be the one that gives up.
+  ( flock -x 9; sleep 6 ) 9>"$lock" 3>&- &
+  holder=$!
+  sleep 0.3
+
+  payload="$(jq -cn --arg c "$PROJ" '{session_id:"s1",cwd:$c,hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:"npm test"},tool_response:"Error: npm not found"}')"
+  start="$(date +%s%N)"
+  bash -c "printf '%s' '$payload' | '$REPO_ROOT/hooks/post-tool-use.sh'" >/dev/null
+  end="$(date +%s%N)"
+  kill "$holder" 2>/dev/null || true
+
+  ms=$(( (end - start) / 1000000 ))
+  echo "hook stalled ${ms}ms"
+  [ "$ms" -lt 3500 ]
+}
+
 @test "pursue_detect_load keeps a state whose counters are numbers" {
   printf '%s\n' '{"version":1,"errors":{"aaa":2},"pairs":{},"files":{"/x":["ab"]},"verified":{"k":"pass"},"sessions":{},"scope":{"fired":true}}' \
     > "$GOAL_DIR/detect-state.json"
