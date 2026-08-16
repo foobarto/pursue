@@ -66,6 +66,15 @@ commit_git_proj() {
   [ "$status" -eq 1 ]
 }
 
+# A failed input redirection is reported by the shell as it sets the
+# redirection up, so `2>/dev/null` on the command never suppresses it.
+@test "pursue_active_slug prints nothing to stderr when active is missing" {
+  rm -f "$PROJ/.agent/goals/active"
+  pursue_active_slug "$PROJ" >"$TMP/out" 2>"$TMP/err" || true
+  [ ! -s "$TMP/err" ]
+  [ ! -s "$TMP/out" ]
+}
+
 @test "pursue_goal_dir returns the state directory" {
   run pursue_goal_dir "$PROJ"
   [ "$status" -eq 0 ]

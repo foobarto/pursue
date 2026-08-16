@@ -48,6 +48,12 @@ payload() { printf '{"session_id":"s1","cwd":"%s","hook_event_name":"%s"}' "$1" 
   ctx="$(echo "$output" | jq -r '.hookSpecificOutput.additionalContext')"
   echo "$ctx" | grep -q "wire the adapter"
   echo "$ctx" | grep -q "adapter test green"
+  # "not the whole plan" is the half that matters: step 0 must be absent.
+  # Asserted with [[ ]], not `! grep`: set -e ignores the failure of a
+  # pipeline that begins with `!`, so a negated grep anywhere but the last
+  # line of a test is not an assertion at all (shellcheck SC2314).
+  [[ "$ctx" != *"scaffold"* ]]
+  [[ "$ctx" != *"dir exists"* ]]
 }
 
 @test "session-start injects open blockers" {
@@ -141,6 +147,14 @@ STUB
   printf 'paused\n' > "$GOAL_DIR/STATUS"
   run bash -c "printf '%s' '$(payload "$PROJ" SessionStart)' | '$REPO_ROOT/hooks/session-start.sh'"
   echo "$output" | jq -r '.hookSpecificOutput.additionalContext' | grep -q 'Status: paused'
+}
+
+@test "session-start prints nothing to stderr when STATUS is missing" {
+  rm -f "$GOAL_DIR/STATUS"
+  bash -c "printf '%s' '$(payload "$PROJ" SessionStart)' | '$REPO_ROOT/hooks/session-start.sh'" \
+    >"$TMP/out" 2>"$TMP/err"
+  [ ! -s "$TMP/err" ]
+  [ "$(cat "$TMP/out")" = "{}" ]
 }
 
 @test "session-start emits valid JSON on malformed input" {

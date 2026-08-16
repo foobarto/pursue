@@ -30,9 +30,16 @@ pursue_project_root() {
 
 # Print the active pursuit's slug.  Returns 1 if absent or empty (an empty
 # `active` file is the documented "no active pursuit" state).
+#
+# The -r guard is not redundant with 2>/dev/null: a failed input redirection
+# is reported by the shell while setting the redirection up, so it is never
+# covered by the redirection of the command's own stderr.  Rule 1 of this
+# file is that hooks stay quiet, and a hook that chatters at every session
+# start is a hook the operator disables.
 pursue_active_slug() {
-  local slug
-  slug="$(tr -d '[:space:]' < "$1/.agent/goals/active" 2>/dev/null)" || return 1
+  local f="$1/.agent/goals/active" slug
+  [[ -r "$f" ]] || return 1
+  slug="$(tr -d '[:space:]' < "$f" 2>/dev/null)" || return 1
   [[ -n "$slug" ]] || return 1
   printf '%s\n' "$slug"
 }
@@ -206,7 +213,12 @@ pursue_inject_main() {
   root="$(pursue_project_root "$cwd")"     || { pursue_emit_noop; return 0; }
   goal_dir="$(pursue_goal_dir "$root")"    || { pursue_emit_noop; return 0; }
 
-  status="$(tr -d '[:space:]' < "$goal_dir/STATUS" 2>/dev/null || printf 'unknown')"
+  # Same -r guard as pursue_active_slug, for the same reason: without it a
+  # missing STATUS leaks the shell's redirection error to stderr.
+  status="unknown"
+  [[ -r "$goal_dir/STATUS" ]] &&
+    status="$(tr -d '[:space:]' < "$goal_dir/STATUS" 2>/dev/null || printf 'unknown')"
+
   case "$status" in
     active|paused|awaiting-confirmation) ;;
     *) pursue_emit_noop; return 0 ;;
