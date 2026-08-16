@@ -712,3 +712,72 @@ pt_payload() {
   run bash -c "jq -r 'select(.kind==\"session-heartbeat\") | .event' '$GOAL_DIR/triggers.jsonl' | wc -l"
   [ "$output" = "2" ]
 }
+
+# ---------------------------------------------------------------------------
+# A counter value is an untrusted operand
+#
+# `[[ x -eq y ]]` evaluates both operands in *arithmetic* context, where bash
+# expands $(...) inside an array subscript.  detect-state.json is attacker-
+# reachable: SKILL.md tells operators to track pursuit state in git, so a
+# cloned repository can ship one, and the value then runs as a command on the
+# victim's next tool call.  Every test below asserts the sentinel's absence
+# explicitly — an uncaught `touch` leaves no other trace.
+# ---------------------------------------------------------------------------
+
+# A state file whose <collection>.<key> is a shell expansion in disguise.
+poisoned_state() {
+  jq -cn --arg c "$1" --arg k "$2" --arg v "PURSUE_PAYLOAD[\$(touch $TMP/PWNED)]" \
+    '{version:1, errors:{}, pairs:{}, files:{}, verified:{}, sessions:{}, scope:{}}
+     | .[$c] = {($k): $v}'
+}
+
+@test "a poisoned session counter runs no command through the hook" {
+  poisoned_state sessions 'PostToolUse:s1' > "$GOAL_DIR/detect-state.json"
+  payload="$(jq -cn --arg c "$PROJ" '{session_id:"s1",cwd:$c,hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:"true"},tool_response:{stdout:"ok"}}')"
+  run bash -c "printf '%s' '$payload' | '$REPO_ROOT/hooks/post-tool-use.sh'"
+  [ ! -e "$TMP/PWNED" ]
+  [ "$status" -eq 0 ]
+  [ "$output" = "{}" ]
+}
+
+@test "a poisoned error counter runs no command through the hook" {
+  PURSUE_PAYLOAD='{"tool_response":"Error: boom"}'
+  fp="$(pursue_error_fingerprint)"
+  poisoned_state errors "$fp" > "$GOAL_DIR/detect-state.json"
+  payload="$(jq -cn --arg c "$PROJ" '{session_id:"s1",cwd:$c,hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:"true"},tool_response:"Error: boom"}')"
+  run bash -c "printf '%s' '$payload' | '$REPO_ROOT/hooks/post-tool-use.sh'"
+  [ ! -e "$TMP/PWNED" ]
+  [ "$status" -eq 0 ]
+  [ "$output" = "{}" ]
+}
+
+# The state file is one delivery route; this pins the comparison itself, so
+# the fix cannot regress to "the load gate is the only thing standing between
+# a counter and the shell".
+@test "the session heartbeat runs no command from an in-memory poisoned counter" {
+  state="$(poisoned_state sessions 'PostToolUse:s1')"
+  run pursue_detect_session_heartbeat "$GOAL_DIR" "$state" PostToolUse s1
+  [ ! -e "$TMP/PWNED" ]
+  [ "$status" -eq 0 ]
+}
+
+@test "pursue_detect_count reads a non-numeric counter as zero" {
+  state="$(poisoned_state errors abc)"
+  run pursue_detect_count "$state" errors abc
+  [ ! -e "$TMP/PWNED" ]
+  [ "$output" = "0" ]
+}
+
+@test "pursue_detect_load rejects a state whose counters are not numbers" {
+  poisoned_state errors abc > "$GOAL_DIR/detect-state.json"
+  run pursue_detect_load "$GOAL_DIR"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.errors == {}'
+}
+
+@test "pursue_detect_load keeps a state whose counters are numbers" {
+  printf '%s\n' '{"version":1,"errors":{"aaa":2},"pairs":{},"files":{"/x":["ab"]},"verified":{"k":"pass"},"sessions":{},"scope":{"fired":true}}' \
+    > "$GOAL_DIR/detect-state.json"
+  run pursue_detect_load "$GOAL_DIR"
+  echo "$output" | jq -e '.errors.aaa == 2 and .files["/x"] == ["ab"] and .verified.k == "pass" and .scope.fired == true'
+}

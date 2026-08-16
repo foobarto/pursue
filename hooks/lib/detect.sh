@@ -88,6 +88,21 @@ pursue_error_fingerprint() {
 
 PURSUE_DETECT_MAX_KEYS="${PURSUE_DETECT_MAX_KEYS:-200}"
 
+# True when $1 is a plain non-negative integer.  Every arithmetic comparison
+# in this file is gated on it, and nothing that has not passed it may reach
+# `[[ -eq ]]`, `[[ -gt ]]`, or `(( ))`.
+#
+# This is a security boundary, not a tidiness rule.  `[[ x -eq y ]]` evaluates
+# BOTH operands in *arithmetic* context, and bash expands `$(...)` inside an
+# array subscript while doing so — so a counter whose value is the string
+# `a[$(touch /tmp/PWNED)]` runs the command on the next tool call.  The `=`
+# string comparison this file used before did not.  And detect-state.json is
+# reachable by an attacker: SKILL.md tells operators to track pursuit state in
+# git, so any cloned repository can ship a poisoned one.  `[[ =~ ]]` performs
+# no arithmetic evaluation, which is what makes this test safe to run on the
+# untrusted value itself.
+pursue_is_uint() { [[ "${1-}" =~ ^[0-9]+$ ]]; }
+
 # How long to wait for the state lock before giving up on this call.
 PURSUE_DETECT_LOCK_WAIT="${PURSUE_DETECT_LOCK_WAIT:-5}"
 
@@ -132,6 +147,14 @@ pursue_detect_locked() {
 # Print the detector state.  A missing or unparseable file yields a valid
 # empty state rather than an error: losing detector history is a degraded
 # detector, but a hook that fails on it is a broken session.
+#
+# The counting collections must additionally hold numbers.  Same shape as the
+# collection-type gate beside it, and the same reason as pursue_is_uint: these
+# values end up as operands of an arithmetic comparison, so a state file that
+# put a shell expansion where a count belongs is corrupt, not merely odd.
+# Rejecting it here means the poisoned value never reaches the counters at
+# all.  (files/verified/scope are excluded because their values are legitimately
+# arrays, strings, and booleans.)
 pursue_detect_load() {
   local f empty='{"version":1,"errors":{},"pairs":{},"files":{},"verified":{},"sessions":{},"scope":{}}'
   f="$(pursue_detect_state_path "$1")"
@@ -139,6 +162,8 @@ pursue_detect_load() {
       .version == 1
       and ([.errors, .pairs, .files, .verified, .sessions, .scope]
            | all(. == null or type == "object"))
+      and ([.errors, .pairs, .sessions]
+           | all((. == null) or (all(.[]; type == "number"))))
     ' "$f" >/dev/null 2>&1; then
     jq -c '.' "$f" 2>/dev/null || printf '%s\n' "$empty"
   else
@@ -175,10 +200,16 @@ pursue_detect_bump() {
     ' 2>/dev/null || printf '%s' "$1"
 }
 
+# The count held at state.<collection>.<key>.  Guaranteed to print a plain
+# non-negative integer: a missing, non-numeric, or otherwise unusable value
+# reads as 0 rather than being handed on to an arithmetic comparison.  Callers
+# rely on that guarantee — it is what lets them compare the result without
+# re-validating it.
 pursue_detect_count() {
-  printf '%s' "$1" \
-    | jq -r --arg c "$2" --arg k "$3" '(.[$c][$k] // 0)' 2>/dev/null \
-    || printf '0\n'
+  local n
+  n="$(printf '%s' "$1" | jq -r --arg c "$2" --arg k "$3" '(.[$c][$k] // 0)' 2>/dev/null)" || n=0
+  pursue_is_uint "$n" || n=0
+  printf '%s\n' "$n"
 }
 
 # ---------------------------------------------------------------------------
@@ -258,15 +289,19 @@ pursue_detect_failures() {
   n="$(pursue_detect_count "$state" errors "$fp")"
   # Arithmetic, not string, comparison: a non-canonical override such as
   # PURSUE_REPEAT_THRESHOLD="03" would never string-equal a count and would
-  # silently disable the detector for the whole session.
-  if [[ "$n" -eq "$PURSUE_REPEAT_THRESHOLD" ]]; then
+  # silently disable the detector for the whole session.  Both operands are
+  # validated first — see pursue_is_uint for why that is not optional — and
+  # forced to base 10, so "08" is eight rather than a fatal octal literal.
+  if pursue_is_uint "$n" && pursue_is_uint "$PURSUE_REPEAT_THRESHOLD" \
+     && (( 10#$n == 10#$PURSUE_REPEAT_THRESHOLD )); then
     pursue_detect_trigger "$goal_dir" repeated_failure \
       "$(jq -cn --arg f "$fp" --argjson c "$n" '{fingerprint: $f, count: $c}')"
   fi
 
   state="$(pursue_detect_bump "$state" pairs "$pair")"
   n="$(pursue_detect_count "$state" pairs "$pair")"
-  if [[ "$n" -eq "$PURSUE_THRASH_THRESHOLD" ]]; then
+  if pursue_is_uint "$n" && pursue_is_uint "$PURSUE_THRASH_THRESHOLD" \
+     && (( 10#$n == 10#$PURSUE_THRASH_THRESHOLD )); then
     pursue_detect_trigger "$goal_dir" retry_thrash \
       "$(jq -cn --arg f "$fp" --arg d "$digest" --arg t "$tree" --argjson c "$n" \
            '{fingerprint: $f, input_digest: $d, tree: $t, count: $c}')"
@@ -367,10 +402,14 @@ pursue_detect_scope() {
   # otherwise count this hook's own bookkeeping as scope creep, and in the next
   # slice each verdict is a new file — a long pursuit would trip its own
   # detector and demand reviews about its own record-keeping.
-  changed="$(git -C "$root" status --porcelain --untracked-files=all -- ':(exclude).agent' 2>/dev/null | wc -l)"
+  # tr, because `wc -l` pads its count with leading blanks on the BSD
+  # userland and the guarded comparison below accepts digits only — an
+  # unstripped count would make this detector silently no-op there.
+  changed="$(git -C "$root" status --porcelain --untracked-files=all -- ':(exclude).agent' 2>/dev/null | wc -l | tr -d '[:space:]')"
   fired="$(printf '%s' "$state" | jq -r '(.scope.fired // false)' 2>/dev/null || printf 'false')"
 
-  if [[ "$changed" -gt "$PURSUE_SCOPE_MAX_FILES" ]]; then
+  if pursue_is_uint "$changed" && pursue_is_uint "$PURSUE_SCOPE_MAX_FILES" \
+     && (( 10#$changed > 10#$PURSUE_SCOPE_MAX_FILES )); then
     if [[ "$fired" != "true" ]]; then
       pursue_detect_trigger "$goal_dir" scope_growth \
         "$(jq -cn --argjson n "$changed" --argjson max "$PURSUE_SCOPE_MAX_FILES" \
@@ -447,7 +486,10 @@ pursue_detect_session_heartbeat() {
   [[ -n "$session" ]] || session="unknown"
   key="${event}:${session}"
   seen="$(pursue_detect_count "$state" sessions "$key")"
-  if [[ "$seen" -eq 0 ]]; then
+  # "$seen" is a plain integer by pursue_detect_count's guarantee, and the
+  # re-check costs nothing: this is the site the reviewer reached the
+  # arithmetic-injection through, so it does not rely on a caller's promise.
+  if pursue_is_uint "$seen" && (( 10#$seen == 0 )); then
     pursue_heartbeat "$goal_dir" "$event" session-heartbeat
     state="$(pursue_detect_bump "$state" sessions "$key")"
   fi
