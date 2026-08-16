@@ -67,18 +67,32 @@ prose.
 ./install.sh --no-hooks   # remove them again
 ```
 
-**What this release's hooks do:** contract re-injection, and nothing else.
-`SessionStart` and `PreCompact` re-inject the active pursuit's contract,
-anchor, active plan step, open blockers, and recent progress — so a pursuit
-survives a session reset or a compaction without depending on the agent
-remembering to re-read its own state. Every hook run also writes a heartbeat
-to `triggers.jsonl`, which is what makes "hooks silently not running"
-detectable after the fact.
+**What this release's hooks do:** re-inject the contract, and observe. Four
+events are registered.
 
-**What they do not yet do:** gate. There is no `Stop` hook and there are no
-detectors in this release, so nothing prevents a pursuit from ending with
-acceptance criteria unmet — that is still the agent's own discipline. The
-completion and continuation gate is specified in
+- `SessionStart` and `PreCompact` re-inject the active pursuit's contract,
+  anchor, active plan step, open blockers, and recent progress — so a
+  pursuit survives a session reset or a compaction without depending on the
+  agent remembering to re-read its own state.
+- `PostToolUse` runs after every tool call and derives deterministic signals
+  from what it sees — a repeated failure, a retried command against an
+  unchanged tree, a file edited back to earlier content, a previously
+  passing command that now fails, a working tree that has outgrown the
+  step. Each one is appended to `.agent/goals/<slug>/triggers.jsonl`, with
+  its counters in a bounded `detect-state.json` beside it.
+- `SubagentStop` records a reviewer subagent's verdict, if it emitted one in
+  a `pursue-verdict` fenced block, under the anchor it reviewed. Subagents
+  that are not reviewers pass through untouched.
+
+Each hook also writes a heartbeat to `triggers.jsonl` — every run for the
+injection hooks, once per session for the observation ones — which is what
+makes "hooks silently not running" detectable after the fact.
+
+**Nothing in this release blocks or gates.** These hooks write files; they
+never deny a tool call, never end a turn, and never steer the agent. So
+nothing yet prevents a pursuit from ending with acceptance criteria unmet —
+that remains the agent's own discipline. The gate that *acts* on the
+triggers and verdicts recorded here is specified in
 [EP-0001](./docs/eps/0001-hook-enforced-pursuit.md) and arrives in a later
 release.
 
@@ -180,6 +194,9 @@ five CLIs and `.claude/` belongs to one of them:
     progress.md       # append-only iteration log (evidence-bearing)
     blockers.md       # active blockers
     STATUS            # active | paused | awaiting-confirmation | done | stopped
+    triggers.jsonl    # hook heartbeats, detector triggers, verdict records
+    detect-state.json # bounded detector counters (written by PostToolUse)
+    verdicts/         # reviewer verdicts, one file per anchor
   _archive/<slug>/    # stopped or done goals, kept for retros
 ```
 
