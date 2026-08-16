@@ -387,6 +387,14 @@ pursue_detect_scope() {
 # A shell command that previously succeeded and now fails is a regression,
 # which is a stronger signal than a command that never worked: something
 # that was true stopped being true.
+#
+# KNOWN WIDENING: EP-0001 scopes this to "a previously passing *verify
+# command*"; this watches every Bash call, so `grep -q TODO` succeeding and
+# then failing reads as a regression.  The narrowing is not available yet —
+# the declared verify commands live in the contract that EP-0001 D10 adds,
+# and there is no contract to read.  Narrow the key to the contract's
+# declared commands once those exist, rather than trying to guess which
+# commands are verification from their text.
 pursue_detect_verification() {
   local goal_dir="$1" state="$2" tool cmd cwd key prior fp
   tool="$(pursue_payload_field tool_name)"
