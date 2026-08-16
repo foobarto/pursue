@@ -133,11 +133,11 @@ pursue_detect_locked() {
 # empty state rather than an error: losing detector history is a degraded
 # detector, but a hook that fails on it is a broken session.
 pursue_detect_load() {
-  local f empty='{"version":1,"errors":{},"pairs":{},"files":{},"verified":{},"scope":{}}'
+  local f empty='{"version":1,"errors":{},"pairs":{},"files":{},"verified":{},"sessions":{},"scope":{}}'
   f="$(pursue_detect_state_path "$1")"
   if [[ -r "$f" ]] && jq -e '
       .version == 1
-      and ([.errors, .pairs, .files, .verified, .scope]
+      and ([.errors, .pairs, .files, .verified, .sessions, .scope]
            | all(. == null or type == "object"))
     ' "$f" >/dev/null 2>&1; then
     jq -c '.' "$f" 2>/dev/null || printf '%s\n' "$empty"
@@ -420,6 +420,36 @@ pursue_detect_verification() {
         "$(jq -cn --arg c "$cmd" --arg f "$fp" '{command: $c, fingerprint: $f}')"
     fi
     state="$(printf '%s' "$state" | jq -c --arg k "$key" '.verified //= {} | .verified[$k] = "fail"' 2>/dev/null || printf '%s' "$state")"
+  fi
+  printf '%s\n' "$state"
+}
+
+# ---------------------------------------------------------------------------
+# Heartbeats for the observation hooks
+# ---------------------------------------------------------------------------
+
+# Write at most one heartbeat per (event, session), and print the updated
+# state.
+#
+# EP-0001 Failure modes requires every hook to leave evidence that it ran,
+# so `/pursue status` can tell "registered and quiet" from "never ran" —
+# without it, an unenforced pursuit looks exactly like an enforced one that
+# had nothing to say.  The injection hooks can heartbeat per run because
+# they run a handful of times per session.  PostToolUse runs after every
+# tool call, so per-run would make triggers.jsonl almost entirely
+# heartbeat and drown the records the next slice has to read.  Once per
+# session is enough to answer the question the heartbeat exists to answer.
+#
+# The marker lives in the same bounded state as the counters, so a long
+# multi-session pursuit cannot grow it without limit either.
+pursue_detect_session_heartbeat() {
+  local goal_dir="$1" state="$2" event="$3" session="${4-}" key seen
+  [[ -n "$session" ]] || session="unknown"
+  key="${event}:${session}"
+  seen="$(pursue_detect_count "$state" sessions "$key")"
+  if [[ "$seen" -eq 0 ]]; then
+    pursue_heartbeat "$goal_dir" "$event" session-heartbeat
+    state="$(pursue_detect_bump "$state" sessions "$key")"
   fi
   printf '%s\n' "$state"
 }

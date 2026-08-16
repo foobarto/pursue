@@ -701,3 +701,14 @@ pt_payload() {
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c edit_revert_churn || true"
   [ "$output" = "0" ]
 }
+
+@test "post-tool-use heartbeats once per session, not once per tool call" {
+  p1="$(jq -cn --arg c "$PROJ" '{session_id:"s1",cwd:$c,hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:"true"},tool_response:{stdout:"ok"}}')"
+  p2="$(jq -cn --arg c "$PROJ" '{session_id:"s2",cwd:$c,hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:"true"},tool_response:{stdout:"ok"}}')"
+  for _ in 1 2 3; do run_hook "$p1" >/dev/null; done
+  for _ in 1 2 3; do run_hook "$p2" >/dev/null; done
+  run bash -c "jq -r 'select(.kind==\"session-heartbeat\") | .event' '$GOAL_DIR/triggers.jsonl' | sort -u | tr '\n' ' '"
+  [ "$output" = "PostToolUse " ]
+  run bash -c "jq -r 'select(.kind==\"session-heartbeat\") | .event' '$GOAL_DIR/triggers.jsonl' | wc -l"
+  [ "$output" = "2" ]
+}

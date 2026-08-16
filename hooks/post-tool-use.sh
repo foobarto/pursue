@@ -25,9 +25,10 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #
 # shellcheck disable=SC2317  # reached indirectly, as pursue_detect_locked's callback
 pursue_detect_cycle() {
-  local goal_dir="$1" root="$2" state
+  local goal_dir="$1" root="$2" session="$3" state
 
   state="$(pursue_detect_load "$goal_dir")"
+  state="$(pursue_detect_session_heartbeat "$goal_dir" "$state" PostToolUse "$session")"
   state="$(pursue_detect_failures "$goal_dir" "$state" "$root")"
   state="$(pursue_detect_churn "$goal_dir" "$state" "$root")"
   state="$(pursue_detect_verification "$goal_dir" "$state")"
@@ -63,7 +64,8 @@ pursue_detect_main() {
   # observation layer observes exactly one actor.
   [[ -z "$(pursue_payload_field agent_id)" ]] || return 0
 
-  pursue_detect_locked "$goal_dir" pursue_detect_cycle "$goal_dir" "$root"
+  pursue_detect_locked "$goal_dir" \
+    pursue_detect_cycle "$goal_dir" "$root" "$(pursue_payload_field session_id)"
   return 0
 }
 

@@ -145,7 +145,10 @@ msg_with() {
   run bash -c "printf '%s' '$payload' | '$REPO_ROOT/hooks/subagent-stop.sh'"
   [ "$status" -eq 0 ]
   [ "$output" = "{}" ]
-  [ ! -f "$GOAL_DIR/triggers.jsonl" ]
+  # The heartbeat is the only line it is allowed to write here.
+  run bash -c "jq -r 'select(.kind!=\"session-heartbeat\") | .kind' '$GOAL_DIR/triggers.jsonl' | wc -l"
+  [ "$output" = "0" ]
+  [ ! -d "$GOAL_DIR/verdicts" ]
 }
 
 @test "subagent-stop never emits decision or continue" {
@@ -160,4 +163,16 @@ msg_with() {
   run bash -c "printf 'garbage' | '$REPO_ROOT/hooks/subagent-stop.sh'"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e . >/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Heartbeat
+# ---------------------------------------------------------------------------
+
+@test "subagent-stop heartbeats even when the subagent was not a reviewer" {
+  payload="$(jq -cn --arg c "$PROJ" '{session_id:"s1", cwd:$c, hook_event_name:"SubagentStop", last_assistant_message:"I finished the search."}')"
+  printf '%s' "$payload" | "$REPO_ROOT/hooks/subagent-stop.sh" >/dev/null
+  printf '%s' "$payload" | "$REPO_ROOT/hooks/subagent-stop.sh" >/dev/null
+  run bash -c "jq -r 'select(.kind==\"session-heartbeat\") | .event' '$GOAL_DIR/triggers.jsonl' | tr '\n' ' '"
+  [ "$output" = "SubagentStop " ]
 }

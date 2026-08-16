@@ -21,6 +21,18 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/verdict.sh
 . "$here/lib/verdict.sh" 2>/dev/null || { printf '{}\n'; exit 0; }
 
+# One heartbeat per session, under the same lock the detectors use — this
+# hook shares detect-state.json with PostToolUse, and several subagents can
+# finish at once.
+#
+# shellcheck disable=SC2317  # reached indirectly, as pursue_detect_locked's callback
+pursue_verdict_beat() {
+  local goal_dir="$1" session="$2" state
+  state="$(pursue_detect_load "$goal_dir")"
+  state="$(pursue_detect_session_heartbeat "$goal_dir" "$state" SubagentStop "$session")"
+  pursue_detect_save "$goal_dir" "$state"
+}
+
 pursue_verdict_main() {
   local cwd root goal_dir status message block anchor
 
@@ -37,6 +49,14 @@ pursue_verdict_main() {
   [[ -r "$goal_dir/STATUS" ]] &&
     status="$(tr -d '[:space:]' < "$goal_dir/STATUS" 2>/dev/null || printf 'unknown')"
   [[ "$status" == "active" ]] || return 0
+
+  # Before the early returns below, not after: EP-0001 Failure modes wants
+  # every hook to leave evidence it ran, and "an active pursuit whose
+  # subagents are never reviewers" is exactly the case where this hook is
+  # correct to stay quiet and still needs to be distinguishable from a hook
+  # that was never registered.
+  pursue_detect_locked "$goal_dir" \
+    pursue_verdict_beat "$goal_dir" "$(pursue_payload_field session_id)"
 
   message="$(pursue_payload_field last_assistant_message)"
   [[ -n "$message" ]] || return 0
