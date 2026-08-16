@@ -581,16 +581,58 @@ install_hooks_codex() {
   echo "      It records that decision itself under [hooks.state] in config.toml."
 }
 
+# Is the hooks feature already enabled, under either valid TOML syntax:
+# `hooks = true` inside the [features] table, or a top-level `features.hooks
+# = true` dotted key (only meaningful before the first table header — once
+# any [section] appears, a later `features.hooks = ...` line belongs to that
+# section, not to the top-level table).  A plain `hooks = true` line under
+# some unrelated table (e.g. [some.other]) must NOT count — that was the
+# bug: a naive whole-file grep for the key name, ignoring which table it
+# lives in, silently treated an unrelated section's `hooks = true` as ours
+# and skipped writing the real [features] gate, so the hooks we register
+# would silently never fire.
+codex_hooks_feature_enabled() {
+  awk '
+    /^[[:space:]]*\[/ {
+      seen_section = 1
+      in_features = ($0 ~ /^[[:space:]]*\[features\][[:space:]]*(#.*)?$/)
+      next
+    }
+    !seen_section && /^[[:space:]]*features\.hooks[[:space:]]*=[[:space:]]*true[[:space:]]*(#.*)?$/ { found = 1 }
+    in_features && /^[[:space:]]*hooks[[:space:]]*=[[:space:]]*true[[:space:]]*(#.*)?$/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$1"
+}
+
+# Is there a [features] table header anywhere, or a top-level features.*
+# dotted key (before the first table header), regardless of whether it sets
+# hooks?  Used to decide "warn, don't touch" vs "safe to append a new
+# [features] table".  Appending a [features] header when a top-level
+# features.* dotted key already exists would be a TOML redefinition error
+# and break the user's whole config, not just our feature — so that case
+# must also count as "present" and go to the warn branch, never the append.
+codex_features_present() {
+  awk '
+    /^[[:space:]]*\[/ {
+      seen_section = 1
+      if ($0 ~ /^[[:space:]]*\[features\][[:space:]]*(#.*)?$/) found = 1
+      next
+    }
+    !seen_section && /^[[:space:]]*features\./ { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$1"
+}
+
 # Append [features] hooks = true if it is not already set.  Deliberately
-# minimal: we never rewrite the user's TOML, only append a section when the
-# key is absent entirely.
+# minimal: we never rewrite the user's TOML, only append a section when
+# [features] (in either syntax) is absent entirely.
 ensure_codex_hooks_feature() {
   local config_toml="$1"
   [[ -f "$config_toml" ]] || : > "$config_toml"
-  if grep -qE '^[[:space:]]*hooks[[:space:]]*=[[:space:]]*true' "$config_toml"; then
+  if codex_hooks_feature_enabled "$config_toml"; then
     return 0
   fi
-  if grep -qE '^\[features\]' "$config_toml"; then
+  if codex_features_present "$config_toml"; then
     echo "warn: [features] exists in $config_toml but hooks is not true" >&2
     echo "      add 'hooks = true' under [features] to enable pursue's hooks" >&2
     return 0

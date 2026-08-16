@@ -172,3 +172,30 @@ JSON
     "$FAKE_HOME/.codex/hooks.json"
   [ "$output" = "0" ]
 }
+
+@test "--hooks enables the codex feature even when hooks = true exists under another section" {
+  mkdir -p "$FAKE_HOME/.codex"
+  printf '[some.other]\nhooks = true\n' > "$FAKE_HOME/.codex/config.toml"
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  grep -q '^\[features\]' "$FAKE_HOME/.codex/config.toml"
+  run awk '/^\[features\]/{f=1;next} /^\[/{f=0} f&&/^hooks[[:space:]]*=[[:space:]]*true/{print "yes"}' \
+    "$FAKE_HOME/.codex/config.toml"
+  [ "$output" = "yes" ]
+}
+
+@test "--hooks does not append [features] when a top-level features.hooks key exists" {
+  mkdir -p "$FAKE_HOME/.codex"
+  printf 'features.hooks = true\n' > "$FAKE_HOME/.codex/config.toml"
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  [ "$(grep -c '^\[features\]' "$FAKE_HOME/.codex/config.toml")" -eq 0 ]
+}
+
+@test "--hooks warns and does not rewrite when [features] exists without hooks" {
+  mkdir -p "$FAKE_HOME/.codex"
+  printf '[features]\nother = 1\n' > "$FAKE_HOME/.codex/config.toml"
+  before="$(cat "$FAKE_HOME/.codex/config.toml")"
+  run "$REPO_ROOT/install.sh" --hooks
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE_HOME/.codex/config.toml")" = "$before" ]
+  [ "$(grep -c '^\[features\]' "$FAKE_HOME/.codex/config.toml")" -eq 1 ]
+}
