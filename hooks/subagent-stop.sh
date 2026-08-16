@@ -33,8 +33,58 @@ pursue_verdict_beat() {
   pursue_detect_save "$goal_dir" "$state"
 }
 
+# Decide and record, with the detector-state lock held for the whole
+# sequence.
+#
+# pursue_verdict_write's refusal to downgrade a pause or stop is a
+# check-then-write: it reads the recorded verdict, then writes over it.  With
+# nothing holding the two together, a second reviewer finishing at the same
+# anchor can pass the check while the first one's write is still in flight,
+# and `continue` lands on top of `stop` — measured at 17 clobbers in 40
+# parallel pairs with no serialisation in play.  It was not observable before
+# this change only because the heartbeat above happens to take the same lock a
+# few milliseconds earlier; a security property must not rest on an unrelated
+# side effect that a later edit is free to move.
+#
+# Everything the decision produces goes to disk, so the callback hands nothing
+# back and the lock can stay a plain subshell.
+#
+# shellcheck disable=SC2317  # reached indirectly, as pursue_detect_locked's callback
+pursue_verdict_capture() {
+  local goal_dir="$1" anchor="$2" block="$3" agent="$4" rc
+
+  # Discarded, never repaired.  In Plan 3 a rejection leaves the originating
+  # trigger unconsumed, so the gate demands another review rather than
+  # letting a garbled — or downgraded — verdict pass for consent.
+  if ! pursue_verdict_validate "$block"; then
+    pursue_verdict_record "$goal_dir" rejected \
+      "$(jq -cn --arg a "$anchor" '{anchor: $a, reason: "failed strict decoding"}')"
+    return 0
+  fi
+
+  pursue_verdict_write "$goal_dir" "$anchor" "$block" "$agent"; rc=$?
+  case "$rc" in
+    0)
+      pursue_verdict_record "$goal_dir" recorded \
+        "$(jq -cn --arg a "$anchor" --arg g "$agent" \
+             --arg v "$(printf '%s' "$block" | jq -r '.verdict')" \
+             '{anchor: $a, verdict: $v} + (if $g == "" then {} else {agent_id: $g} end)')"
+      ;;
+    2)
+      pursue_verdict_record "$goal_dir" rejected \
+        "$(jq -cn --arg a "$anchor" \
+             '{anchor: $a, reason: "a pause or stop is already recorded at this anchor"}')"
+      ;;
+    *)
+      pursue_verdict_record "$goal_dir" rejected \
+        "$(jq -cn --arg a "$anchor" '{anchor: $a, reason: "could not be written"}')"
+      ;;
+  esac
+  return 0
+}
+
 pursue_verdict_main() {
-  local cwd root goal_dir status message block anchor agent rc
+  local cwd root goal_dir status message block anchor agent
 
   pursue_read_payload
   pursue_have_jq || return 0
@@ -69,33 +119,8 @@ pursue_verdict_main() {
   anchor="$(pursue_anchor "$root" "$goal_dir")"
   agent="$(pursue_payload_field agent_id)"
 
-  # Discarded, never repaired.  In Plan 3 a rejection leaves the originating
-  # trigger unconsumed, so the gate demands another review rather than
-  # letting a garbled — or downgraded — verdict pass for consent.
-  if ! pursue_verdict_validate "$block"; then
-    pursue_verdict_record "$goal_dir" rejected \
-      "$(jq -cn --arg a "$anchor" '{anchor: $a, reason: "failed strict decoding"}')"
-    return 0
-  fi
-
-  pursue_verdict_write "$goal_dir" "$anchor" "$block" "$agent"; rc=$?
-  case "$rc" in
-    0)
-      pursue_verdict_record "$goal_dir" recorded \
-        "$(jq -cn --arg a "$anchor" --arg g "$agent" \
-             --arg v "$(printf '%s' "$block" | jq -r '.verdict')" \
-             '{anchor: $a, verdict: $v} + (if $g == "" then {} else {agent_id: $g} end)')"
-      ;;
-    2)
-      pursue_verdict_record "$goal_dir" rejected \
-        "$(jq -cn --arg a "$anchor" \
-             '{anchor: $a, reason: "a pause or stop is already recorded at this anchor"}')"
-      ;;
-    *)
-      pursue_verdict_record "$goal_dir" rejected \
-        "$(jq -cn --arg a "$anchor" '{anchor: $a, reason: "could not be written"}')"
-      ;;
-  esac
+  pursue_detect_locked "$goal_dir" \
+    pursue_verdict_capture "$goal_dir" "$anchor" "$block" "$agent"
   return 0
 }
 

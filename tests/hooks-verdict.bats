@@ -267,6 +267,38 @@ msg_with() {
 # Verdict records are not triggers
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# The downgrade refusal is a check-then-write, so it needs the lock
+#
+# Dispatching the two reviewers *together* is the case that matters: the
+# clobber needs the continue's check to happen before the stop's write.
+# Measured against this same hook with no serialisation on the verdict path,
+# 21 of 40 pairs ended with `continue`; with the lock, 0 of 40.
+#
+# Deliberately not "write a stop, then race two continues": both continues
+# read the stop and refuse whether or not anything is locked, so it asserts
+# nothing at all — 0 of 40 unlocked, same as locked.
+# ---------------------------------------------------------------------------
+
+@test "a stop and a continue landing together leave the stop" {
+  command -v flock >/dev/null 2>&1 || skip "no flock: this hook runs unlocked here by design"
+  anchor="$(pursue_anchor "$PROJ" "$GOAL_DIR")"
+  slug="$(pursue_anchor_slug "$anchor")"
+  stop_payload="$(jq -cn --arg c "$PROJ" --arg g "agt_watchdog" --arg m "$(msg_with '{"verdict":"stop","reason":"acceptance criteria unmet"}')" \
+    '{session_id:"s1", cwd:$c, hook_event_name:"SubagentStop", agent_id:$g, last_assistant_message:$m}')"
+  cont_payload="$(jq -cn --arg c "$PROJ" --arg g "agt_friendly" --arg m "$(msg_with '{"verdict":"continue","reason":"all good, carry on"}')" \
+    '{session_id:"s1", cwd:$c, hook_event_name:"SubagentStop", agent_id:$g, last_assistant_message:$m}')"
+
+  for _ in $(seq 1 15); do
+    rm -rf "$GOAL_DIR/verdicts"
+    # 3>&- so bats does not wait on the background jobs holding its fd 3.
+    printf '%s' "$stop_payload" | "$REPO_ROOT/hooks/subagent-stop.sh" >/dev/null 2>&1 3>&- &
+    printf '%s' "$cont_payload" | "$REPO_ROOT/hooks/subagent-stop.sh" >/dev/null 2>&1 3>&- &
+    wait
+    [ "$(jq -r '.verdict' "$GOAL_DIR/verdicts/$slug.json")" = "stop" ]
+  done
+}
+
 @test "subagent-stop writes no kind:trigger line on either path" {
   good="$(jq -cn --arg c "$PROJ" --arg m "$(msg_with '{"verdict":"stop","reason":"unsafe"}')" \
     '{session_id:"s1", cwd:$c, hook_event_name:"SubagentStop", last_assistant_message:$m}')"
