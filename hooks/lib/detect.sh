@@ -121,12 +121,26 @@ pursue_detect_lock_path()  { printf '%s/detect-state.lock\n' "$1"; }
 #
 # Failing open here is deliberate and asymmetric.  A missed detection costs
 # one signal out of many; a hook that blocks costs the operator a wedged
-# tool call.  So no flock, an unwritable state directory, or a lock we
-# cannot take within the timeout all mean "skip detection for this call".
+# tool call.  So an unwritable state directory, or a lock we cannot take
+# within the timeout, both mean "skip detection for this call".
+#
+# A *missing* flock is the exception, and skipping was the wrong answer for
+# it: with no flock on PATH this wrote no state, no triggers and — worst —
+# no heartbeat, which is precisely the "hooks registered but never running"
+# condition EP-0001's heartbeat exists to make detectable.  Silence is not a
+# degraded signal, it is an actively misleading one.  So run the callback
+# unlocked instead.  That reinstates the lost-update race on such systems
+# (parallel PostToolUse hooks can overwrite each other's counters), which is
+# strictly better than being unable to tell an unenforced pursuit from a
+# quiet one.  install.sh names flock so the operator hears about it once, at
+# install time, rather than never.
 pursue_detect_locked() {
   local goal_dir="$1" lock
   shift
-  command -v flock >/dev/null 2>&1 || return 0
+  if ! command -v flock >/dev/null 2>&1; then
+    "$@"
+    return 0
+  fi
   lock="$(pursue_detect_lock_path "$goal_dir")"
   # Guard the redirection instead of redirecting and hoping: a failed `9>`
   # is reported while the redirection is being set up, so a 2>/dev/null

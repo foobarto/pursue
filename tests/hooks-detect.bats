@@ -775,6 +775,59 @@ poisoned_state() {
   echo "$output" | jq -e '.errors == {}'
 }
 
+# ---------------------------------------------------------------------------
+# A missing flock degrades detection; it does not switch it off
+#
+# Skipping the callback outright meant no state, no triggers and no
+# heartbeat — which is exactly what "the hooks were never installed" looks
+# like, and the heartbeat exists to tell those two apart.
+# ---------------------------------------------------------------------------
+
+# A PATH containing every command except one.  Rebuilding the search path is
+# the only way to hide a binary from a script we exec: there is no "unset this
+# one command" that survives the exec.
+path_without() {
+  local omit="$1" dest="$TMP/nobin" d f b
+  mkdir -p "$dest"
+  local IFS=:
+  for d in $PATH; do
+    [ -d "$d" ] || continue
+    for f in "$d"/*; do
+      b="${f##*/}"
+      [ "$b" = "$omit" ] && continue
+      [ -e "$dest/$b" ] && continue
+      ln -s "$f" "$dest/$b" 2>/dev/null || true
+    done
+  done
+  printf '%s\n' "$dest"
+}
+
+@test "post-tool-use still records state and a heartbeat without flock" {
+  nobin="$(path_without flock)"
+  # Without this the test would pass vacuously on any machine where the
+  # mirror failed to exclude flock.
+  run bash -c "export PATH='$nobin'; command -v flock || echo masked"
+  [ "$output" = "masked" ]
+
+  payload="$(jq -cn --arg c "$PROJ" '{session_id:"s1",cwd:$c,hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:"npm test"},tool_response:"Error: npm not found"}')"
+  run bash -c "export PATH='$nobin'; printf '%s' '$payload' | '$REPO_ROOT/hooks/post-tool-use.sh'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "{}" ]
+  [ -f "$GOAL_DIR/detect-state.json" ]
+  run bash -c "jq -r 'select(.kind==\"session-heartbeat\") | .event' '$GOAL_DIR/triggers.jsonl'"
+  [ "$output" = "PostToolUse" ]
+}
+
+@test "detectors still fire without flock" {
+  nobin="$(path_without flock)"
+  payload="$(jq -cn --arg c "$PROJ" '{session_id:"s1",cwd:$c,hook_event_name:"PostToolUse",tool_name:"Bash",tool_input:{command:"npm test"},tool_response:"Error: npm not found"}')"
+  for _ in 1 2; do
+    bash -c "export PATH='$nobin'; printf '%s' '$payload' | '$REPO_ROOT/hooks/post-tool-use.sh'" >/dev/null
+  done
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' | grep -c retry_thrash"
+  [ "$output" = "1" ]
+}
+
 @test "pursue_detect_load keeps a state whose counters are numbers" {
   printf '%s\n' '{"version":1,"errors":{"aaa":2},"pairs":{},"files":{"/x":["ab"]},"verified":{"k":"pass"},"sessions":{},"scope":{"fired":true}}' \
     > "$GOAL_DIR/detect-state.json"

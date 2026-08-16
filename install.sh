@@ -492,11 +492,21 @@ resolve_config_path() {
   fi
 }
 
-require_jq_for_hooks() {
+# jq is fatal, flock is not.  Without jq the hooks cannot read their payload
+# at all; without flock they still run and still heartbeat, they just cannot
+# serialise detect-state.json, so two tool calls finishing together can lose
+# one of the two updates.  Say so here, because install time is the only
+# moment the operator is looking — the hooks themselves are required to stay
+# silent, so nothing else will ever mention it.
+require_hook_deps() {
   if ! command -v jq >/dev/null 2>&1; then
     echo "error: --hooks requires jq (the hooks parse JSON payloads)" >&2
     echo "       install jq, or re-run without --hooks" >&2
     exit 3
+  fi
+  if ! command -v flock >/dev/null 2>&1; then
+    echo "warning: --hooks wants flock (the detectors serialise their state file)" >&2
+    echo "         without it detection still runs, but parallel tool calls can lose an update" >&2
   fi
 }
 
@@ -772,7 +782,7 @@ for extra in "${skill_dirs[@]}"; do
 done
 
 if (( do_hooks )); then
-  require_jq_for_hooks
+  require_hook_deps
   for cli in "${detected_clis[@]}"; do
     case "$cli" in
       claude-code) install_hooks_claude; hook_targets+=("$cli") ;;
@@ -783,7 +793,7 @@ if (( do_hooks )); then
 fi
 
 if (( undo_hooks )); then
-  require_jq_for_hooks
+  require_hook_deps
   for cli in "${detected_clis[@]}"; do
     case "$cli" in
       claude-code) uninstall_hooks_claude ;;
