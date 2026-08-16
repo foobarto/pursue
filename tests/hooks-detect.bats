@@ -660,3 +660,32 @@ pt_payload() {
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' | grep -c repeated_failure"
   [ "$output" = "1" ]
 }
+
+# ---------------------------------------------------------------------------
+# Quiet failure modes in the trigger writer
+# ---------------------------------------------------------------------------
+
+@test "pursue_detect_trigger survives a two-argument call under set -u" {
+  run bash -c "set -u
+    . '$REPO_ROOT/hooks/lib/common.sh'
+    . '$REPO_ROOT/hooks/lib/detect.sh'
+    pursue_detect_trigger '$GOAL_DIR' lonely_signal
+    echo reached-the-end"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *reached-the-end* ]]
+  run jq -r '.name' "$GOAL_DIR/triggers.jsonl"
+  [ "$output" = "lonely_signal" ]
+}
+
+@test "pursue_detect_trigger writes no stderr when the state dir is unwritable" {
+  [ "$(id -u)" -ne 0 ] || skip "root ignores the write bit"
+  ro="$TMP/readonly"
+  mkdir -p "$ro"
+  chmod 500 "$ro"
+  run bash -c ". '$REPO_ROOT/hooks/lib/common.sh'
+    . '$REPO_ROOT/hooks/lib/detect.sh'
+    pursue_detect_trigger '$ro' scope_growth '{\"changed_files\":42}' 2>&1 1>/dev/null"
+  chmod 700 "$ro"
+  [ "$status" -eq 0 ]
+  [ "$output" = "" ]
+}

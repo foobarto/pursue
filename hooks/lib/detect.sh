@@ -197,14 +197,35 @@ PURSUE_THRASH_THRESHOLD="${PURSUE_THRASH_THRESHOLD:-2}"
 # stays queryable.
 pursue_detect_trigger() {
   local detail line
-  # Assigned to a local first: `${3:-{}}` is ambiguous to the parser
-  # because the default value's own brace closes the expansion.
-  detail="$3"
+  # `${3-}`, not `$3`: under `set -u` a two-argument call aborts the shell
+  # here, before anything is written — and it would abort it *silently*,
+  # since every hook redirects its own stderr away.  The `-n` test below is
+  # only a real guard once the expansion cannot itself be fatal.
+  # (`${3:-{}}` is not an option: the default value's own brace closes the
+  # expansion, so the parser sees `${3:-{}` followed by a stray `}`.)
+  detail="${3-}"
   [[ -n "$detail" ]] || detail='{}'
   line="$(jq -cn --arg n "$2" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --argjson d "$detail" \
             '{ts: $ts, kind: "trigger", name: $n, detail: $d}' 2>/dev/null)" || return 0
-  printf '%s\n' "$line" >> "$1/triggers.jsonl" 2>/dev/null || true
+  pursue_detect_append "$1" "$line"
+}
+
+# Append one line to triggers.jsonl, quietly.
+#
+# The append needs a writability guard for the same reason common.sh's
+# readers need `-r`: the shell reports a failed redirection while setting it
+# up, so the command's own `2>/dev/null` never covers it.  Without this, a
+# state directory the hook cannot write leaks "Permission denied" to stderr
+# on *every* tool call.
+pursue_detect_append() {
+  local f="$1/triggers.jsonl"
+  if [[ -e "$f" ]]; then
+    [[ -w "$f" ]] || return 0
+  else
+    [[ -w "$1" ]] || return 0
+  fi
+  printf '%s\n' "$2" >> "$f" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
