@@ -17,6 +17,9 @@
 #   ./install.sh --skill-dir PATH   # also install into an arbitrary dir
 #                                   # (e.g. a project-local .claude/skills/)
 #   ./install.sh --force            # overwrite pre-existing non-symlink destinations
+#   ./install.sh --hooks            # also register the lifecycle hooks that
+#                                   # enforce pursuits (Claude Code, Codex)
+#   ./install.sh --no-hooks         # remove previously registered hooks
 #   ./install.sh --version          # print repo commit/tag, exit
 #
 # Exit codes:
@@ -111,6 +114,8 @@ do_list=0
 do_version=0
 use_copy=0
 force=0
+do_hooks=0
+undo_hooks=0
 target_cli=""
 declare -a skill_dirs=()
 
@@ -120,6 +125,8 @@ while [[ $# -gt 0 ]]; do
     --list)     do_list=1; shift ;;
     --copy)     use_copy=1; shift ;;
     --force)    force=1; shift ;;
+    --hooks)    do_hooks=1; shift ;;
+    --no-hooks) undo_hooks=1; shift ;;
     --version)  do_version=1; shift ;;
     --cli)      target_cli="${2:-}"; shift 2 ;;
     --skill-dir)
@@ -435,6 +442,319 @@ install_skill_dir() {
 }
 
 # ---------------------------------------------------------------------------
+# Lifecycle hooks (EP-0001)
+#
+# Claude Code and Codex accept the same hook scripts; only the config file
+# differs.  Both are keyed on the absolute script path, which is also how we
+# recognise our own entries on re-install and on --no-hooks.  Nothing else in
+# either config is touched.
+#
+# The stored `command` is a shell command line, not a path — both harnesses
+# hand it to a shell — so it is written through jq's @sh.  Without that, a
+# checkout under a directory with a space in its name registers a command
+# that resolves to the first word and the hook never runs.  @sh is applied on
+# both the write and the match, so the string --hooks writes is exactly the
+# string --no-hooks looks for.
+# ---------------------------------------------------------------------------
+
+# Enforcement bookkeeping, consumed by report_hook_enforcement() at the very
+# end of the run.  These record what actually happened, not what was asked
+# for: EP-0001 §Portability requires the installer to say when enforcement is
+# not active rather than leaving the operator to infer it from a `done:`.
+declare -a hook_targets=()     # harnesses where hook registration ran
+declare -a hookless_clis=()    # detected harnesses with no hook surface
+codex_feature_unset=0          # codex hooks registered behind a gate we could not set
+
+# Emit "<Event> <absolute-script-path>" per registered hook.
+pursue_hook_entries() {
+  printf '%s %s\n' SessionStart "$repo_root/hooks/session-start.sh"
+  printf '%s %s\n' PreCompact  "$repo_root/hooks/pre-compact.sh"
+}
+
+# Resolve a harness config path through any symlinks, so the rewrite lands
+# on the real file.  Symlinking ~/.claude/settings.json (or ~/.codex/
+# hooks.json) into a dotfiles repo is common — stow and chezmoi both do it —
+# and mv'ing a temp file onto the link would replace the link with a regular
+# file.  That detaches the config from its source of truth, so the next
+# `stow` / `chezmoi apply` silently reverts the hook registration and the
+# operator is back to hooks registered but never running, with no signal.
+#
+# readlink -f resolves the whole chain; if it is unavailable or fails we use
+# the path as given, which is exactly the previous behaviour.
+resolve_config_path() {
+  local resolved
+  if resolved="$(readlink -f "$1" 2>/dev/null)" && [[ -n "$resolved" ]]; then
+    printf '%s' "$resolved"
+  else
+    printf '%s' "$1"
+  fi
+}
+
+require_jq_for_hooks() {
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "error: --hooks requires jq (the hooks parse JSON payloads)" >&2
+    echo "       install jq, or re-run without --hooks" >&2
+    exit 3
+  fi
+}
+
+# Merge our entries into ~/.claude/settings.json, preserving every other key
+# and every foreign hook.
+install_hooks_claude() {
+  local settings="${CLI_PARENT[claude-code]}/settings.json"
+  local target event script tmp
+
+  if (( dry_run )); then
+    while read -r event script; do
+      echo "plan: register $event -> $script in $settings"
+    done < <(pursue_hook_entries)
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$settings")" || { echo "error: mkdir $(dirname "$settings")" >&2; exit 3; }
+  [[ -f "$settings" ]] || echo '{}' > "$settings"
+  target="$(resolve_config_path "$settings")"
+
+  while read -r event script; do
+    tmp="$(mktemp "${target}.XXXXXX")"
+    jq --arg e "$event" --arg c "$script" '
+      ($c | @sh) as $q
+      | .hooks //= {}
+      | .hooks[$e] //= []
+      # Drop any previous registration of this exact script, then append once.
+      | .hooks[$e] = (
+          [ .hooks[$e][]
+            | .hooks = [ .hooks[]? | select(.command != $q) ]
+            | select((.hooks | length) > 0)
+          ]
+          + [ { hooks: [ { type: "command", command: $q, timeout: 10 } ] } ]
+        )
+    ' "$target" > "$tmp" || { echo "error: failed to update $settings" >&2; rm -f "$tmp"; exit 3; }
+    if [[ -f "$target" ]]; then
+      chmod --reference="$target" "$tmp" 2>/dev/null || true
+    fi
+    mv "$tmp" "$target"
+  done < <(pursue_hook_entries)
+
+  echo "done: claude-code hooks -> $settings"
+}
+
+# Remove only our entries from ~/.claude/settings.json.
+uninstall_hooks_claude() {
+  local settings="${CLI_PARENT[claude-code]}/settings.json"
+  local target event script tmp
+  [[ -f "$settings" ]] || return 0
+
+  if (( dry_run )); then
+    echo "plan: remove pursue hooks from $settings"
+    return 0
+  fi
+
+  target="$(resolve_config_path "$settings")"
+
+  while read -r event script; do
+    tmp="$(mktemp "${target}.XXXXXX")"
+    jq --arg e "$event" --arg c "$script" '
+      ($c | @sh) as $q
+      | if (.hooks[$e]? | type) == "array" then
+          .hooks[$e] = [ .hooks[$e][]
+            | .hooks = [ .hooks[]? | select(.command != $q) ]
+            | select((.hooks | length) > 0) ]
+        else . end
+    ' "$target" > "$tmp" || { rm -f "$tmp"; exit 3; }
+    if [[ -f "$target" ]]; then
+      chmod --reference="$target" "$tmp" 2>/dev/null || true
+    fi
+    mv "$tmp" "$target"
+  done < <(pursue_hook_entries)
+
+  echo "done: removed claude-code hooks from $settings"
+}
+
+# Codex reads ~/.codex/hooks.json and gates the whole surface behind
+# [features] hooks = true in config.toml.
+#
+# Trust is Codex's own: it records trusted_hash under [hooks.state] in
+# config.toml on first run, after prompting.  We deliberately never write
+# that — an installer that pre-seeds trust for its own hooks defeats the
+# mechanism it is registering with.
+install_hooks_codex() {
+  local hooks_json="${CLI_PARENT[codex]}/hooks.json"
+  local config_toml="${CLI_PARENT[codex]}/config.toml"
+  local target event script tmp
+
+  if (( dry_run )); then
+    while read -r event script; do
+      echo "plan: register $event -> $script in $hooks_json"
+    done < <(pursue_hook_entries)
+    echo "plan: ensure [features] hooks = true in $config_toml"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$hooks_json")" || { echo "error: mkdir $(dirname "$hooks_json")" >&2; exit 3; }
+  [[ -f "$hooks_json" ]] || echo '{}' > "$hooks_json"
+  target="$(resolve_config_path "$hooks_json")"
+
+  while read -r event script; do
+    tmp="$(mktemp "${target}.XXXXXX")"
+    jq --arg e "$event" --arg c "$script" '
+      ($c | @sh) as $q
+      | .hooks //= {}
+      | .hooks[$e] //= []
+      | .hooks[$e] = (
+          [ .hooks[$e][]
+            | .hooks = [ .hooks[]? | select(.command != $q) ]
+            | select((.hooks | length) > 0)
+          ]
+          + [ { hooks: [ { type: "command", command: $q, timeout: 10 } ] } ]
+        )
+    ' "$target" > "$tmp" || { echo "error: failed to update $hooks_json" >&2; rm -f "$tmp"; exit 3; }
+    if [[ -f "$target" ]]; then
+      chmod --reference="$target" "$tmp" 2>/dev/null || true
+    fi
+    mv "$tmp" "$target"
+  done < <(pursue_hook_entries)
+
+  ensure_codex_hooks_feature "$config_toml"
+
+  echo "done: codex hooks -> $hooks_json"
+  echo "note: Codex will ask you to trust these hooks on first run."
+  echo "      It records that decision itself under [hooks.state] in config.toml."
+}
+
+# Both predicates below match against `h`: the line with every space and tab
+# removed.  TOML permits whitespace almost anywhere a value is expected, so
+# `[ features ]` and `[features]` are the same table and `features={hooks=
+# true}` and `features = { hooks = true }` are the same key.  Matching the
+# raw line meant a spaced variant slipped past both checks and we appended a
+# second [features] definition, which is a TOML error ("Cannot declare
+# ('features',) twice") — we would break the whole config, not just our
+# feature.  Normalising first is what makes the two checks agree with the
+# parser instead of with a particular spelling.
+
+# Is the hooks feature already enabled, under any of the three valid TOML
+# spellings: `hooks = true` inside the [features] table, a top-level
+# `features.hooks = true` dotted key, or a top-level `features = { hooks =
+# true }` inline table.  The two top-level forms are only meaningful before
+# the first table header — once any [section] appears, a later `features.x`
+# line belongs to that section, not to the top-level table.
+#
+# A plain `hooks = true` line under some unrelated table (e.g. [some.other])
+# must NOT count — that was the original bug: a naive whole-file grep for
+# the key name, ignoring which table it lives in, silently treated an
+# unrelated section's `hooks = true` as ours and skipped writing the real
+# [features] gate, so the hooks we register would silently never fire.
+codex_hooks_feature_enabled() {
+  awk '
+    { h = $0; gsub(/[ \t\r]/, "", h) }
+    h ~ /^\[/ {
+      seen_section = 1
+      in_features = (h ~ /^\[features\](#.*)?$/)
+      next
+    }
+    !seen_section && h ~ /^features\.hooks=true(#.*)?$/ { found = 1 }
+    !seen_section && h ~ /^features=[{]/ && h ~ /[{,]hooks=true[,}]/ { found = 1 }
+    in_features && h ~ /^hooks=true(#.*)?$/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$1"
+}
+
+# Is there a [features] table header anywhere, or a top-level `features.`
+# dotted key or `features =` assignment (before the first table header),
+# regardless of whether it sets hooks?  Used to decide "warn, don't touch"
+# vs "safe to append a new [features] table".  Appending a [features] header
+# when the key is already defined in any of those forms would be a TOML
+# redefinition error, so every one of them must count as "present" and go to
+# the warn branch, never the append.
+codex_features_present() {
+  awk '
+    { h = $0; gsub(/[ \t\r]/, "", h) }
+    h ~ /^\[/ {
+      seen_section = 1
+      if (h ~ /^\[features\](#.*)?$/) found = 1
+      next
+    }
+    !seen_section && h ~ /^features[.=]/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$1"
+}
+
+# Append [features] hooks = true if it is not already set.  Deliberately
+# minimal: we never rewrite the user's TOML, only append a section when
+# [features] (in either syntax) is absent entirely.
+ensure_codex_hooks_feature() {
+  local config_toml="$1"
+  [[ -f "$config_toml" ]] || : > "$config_toml"
+  if codex_hooks_feature_enabled "$config_toml"; then
+    return 0
+  fi
+  if codex_features_present "$config_toml"; then
+    echo "warn: [features] exists in $config_toml but hooks is not true" >&2
+    echo "      add 'hooks = true' under [features] to enable pursue's hooks" >&2
+    codex_feature_unset=1
+    return 0
+  fi
+  printf '\n[features]\nhooks = true\n' >> "$config_toml"
+}
+
+uninstall_hooks_codex() {
+  local hooks_json="${CLI_PARENT[codex]}/hooks.json"
+  local target event script tmp
+  [[ -f "$hooks_json" ]] || return 0
+
+  if (( dry_run )); then
+    echo "plan: remove pursue hooks from $hooks_json"
+    return 0
+  fi
+
+  target="$(resolve_config_path "$hooks_json")"
+
+  while read -r event script; do
+    tmp="$(mktemp "${target}.XXXXXX")"
+    jq --arg e "$event" --arg c "$script" '
+      ($c | @sh) as $q
+      | if (.hooks[$e]? | type) == "array" then
+          .hooks[$e] = [ .hooks[$e][]
+            | .hooks = [ .hooks[]? | select(.command != $q) ]
+            | select((.hooks | length) > 0) ]
+        else . end
+    ' "$target" > "$tmp" || { rm -f "$tmp"; exit 3; }
+    if [[ -f "$target" ]]; then
+      chmod --reference="$target" "$tmp" 2>/dev/null || true
+    fi
+    mv "$tmp" "$target"
+  done < <(pursue_hook_entries)
+
+  echo "done: removed codex hooks from $hooks_json"
+  echo "note: stale [hooks.state] entries may remain in config.toml; Codex prunes them."
+}
+
+# Say, as the last thing printed, whether enforcement is actually live.
+#
+# EP-0001 §Portability: losing hooks is "a real reduction in guarantees, not
+# a cosmetic one, and the installer must say so at install time rather than
+# leaving the operator to infer it".  Two paths used to end in exit 0 with
+# `done:` as the final line and no enforcement at all — Codex registered
+# behind a [features] gate we declined to rewrite, and --hooks on a machine
+# where every detected harness is hookless, which printed nothing about
+# hooks whatsoever.  A warning emitted before the success line is a warning
+# the operator scrolls past.
+report_hook_enforcement() {
+  local list
+  if (( codex_feature_unset )); then
+    echo "warning: codex hooks registered but NOT enabled — add 'hooks = true' under [features] in ${CLI_PARENT[codex]}/config.toml" >&2
+  fi
+  if (( ${#hook_targets[@]} == 0 )); then
+    echo "warning: --hooks registered nothing — no harness with a hook surface was detected" >&2
+    echo "         pursue runs unenforced here; only Claude Code and Codex expose hooks" >&2
+  fi
+  if (( ${#hookless_clis[@]} > 0 )); then
+    list="$(printf '%s, ' "${hookless_clis[@]}")"
+    echo "note: ${list%, } detected — no hook surface, no enforcement there" >&2
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
 for cli in "${detected_clis[@]}"; do
@@ -449,7 +769,34 @@ for extra in "${skill_dirs[@]}"; do
   install_skill_dir "$extra"
 done
 
+if (( do_hooks )); then
+  require_jq_for_hooks
+  for cli in "${detected_clis[@]}"; do
+    case "$cli" in
+      claude-code) install_hooks_claude; hook_targets+=("$cli") ;;
+      codex)       install_hooks_codex;  hook_targets+=("$cli") ;;
+      *)           hookless_clis+=("$cli") ;;
+    esac
+  done
+fi
+
+if (( undo_hooks )); then
+  require_jq_for_hooks
+  for cli in "${detected_clis[@]}"; do
+    case "$cli" in
+      claude-code) uninstall_hooks_claude ;;
+      codex)       uninstall_hooks_codex ;;
+    esac
+  done
+fi
+
 if (( dry_run )); then
   echo ""
   echo "(dry-run — no changes written)"
+fi
+
+# Deliberately the last output of the run: whatever else was printed, the
+# final word is whether enforcement is actually active.
+if (( do_hooks )); then
+  report_hook_enforcement
 fi

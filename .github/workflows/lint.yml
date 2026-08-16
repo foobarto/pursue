@@ -32,7 +32,13 @@ jobs:
         with:
           scandir: "."
           check_together: "yes"
-          severity: warning
+        env:
+          # Match the standard the branch holds itself to locally:
+          # `shellcheck -x` at shellcheck's own default severity. Without -x
+          # the sourced hooks/lib/common.sh is never followed, and a
+          # `severity: warning` floor hides info- and style-level findings
+          # that a bare local run would report.
+          SHELLCHECK_OPTS: -x
 
   install-script:
     name: install.sh (bats)
