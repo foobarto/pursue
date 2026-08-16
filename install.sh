@@ -469,6 +469,7 @@ codex_feature_unset=0          # codex hooks registered behind a gate we could n
 pursue_hook_entries() {
   printf '%s %s\n' SessionStart "$repo_root/hooks/session-start.sh"
   printf '%s %s\n' PreCompact  "$repo_root/hooks/pre-compact.sh"
+  printf '%s %s\n' PostToolUse "$repo_root/hooks/post-tool-use.sh"
 }
 
 # Resolve a harness config path through any symlinks, so the rewrite lands

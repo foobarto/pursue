@@ -260,7 +260,11 @@ pursue_detect_churn() {
 pursue_detect_scope() {
   local goal_dir="$1" root="$2" changed
   git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || return 0
-  changed="$(git -C "$root" status --porcelain --untracked-files=all 2>/dev/null | wc -l)"
+  # Exclude pursue's own state: a project that does not gitignore .agent/ would
+  # otherwise count this hook's own bookkeeping as scope creep, and in the next
+  # slice each verdict is a new file — a long pursuit would trip its own
+  # detector and demand reviews about its own record-keeping.
+  changed="$(git -C "$root" status --porcelain --untracked-files=all -- ':(exclude).agent' 2>/dev/null | wc -l)"
   [[ "$changed" -gt "$PURSUE_SCOPE_MAX_FILES" ]] || return 0
   pursue_detect_trigger "$goal_dir" scope_growth \
     "$(jq -cn --argjson n "$changed" --argjson max "$PURSUE_SCOPE_MAX_FILES" \

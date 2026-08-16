@@ -458,3 +458,78 @@ edit_payload() { printf '{"tool_name":"Edit","tool_input":{"file_path":"%s"},"to
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c verification_regression || true"
   [ "$output" = "0" ]
 }
+
+# ---------------------------------------------------------------------------
+# PostToolUse entrypoint
+#
+# The brief's shared `trigger_names()` helper was never actually defined
+# (Task 3 inlined the filter instead — see progress.md), so these tests use
+# the same inline `jq` filter every other test in this file already uses,
+# consistent with how Task 4 resolved the identical drift.
+# ---------------------------------------------------------------------------
+
+run_hook() { printf '%s' "$1" | "$REPO_ROOT/hooks/post-tool-use.sh"; }
+
+pt_payload() {
+  printf '{"session_id":"s1","cwd":"%s","hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"%s"},"tool_response":{"error":"%s"}}' \
+    "$PROJ" "$1" "$2"
+}
+
+@test "post-tool-use emits an empty object and exits 0" {
+  run run_hook "$(pt_payload 'npm test' 'npm not found')"
+  [ "$status" -eq 0 ]
+  [ "$output" = "{}" ]
+}
+
+@test "post-tool-use never emits decision, continue, or permissionDecision" {
+  run run_hook "$(pt_payload 'npm test' 'npm not found')"
+  echo "$output" | jq -e 'has("decision") | not'
+  echo "$output" | jq -e 'has("continue") | not'
+  echo "$output" | jq -e 'has("permissionDecision") | not'
+  echo "$output" | jq -e 'has("stopReason") | not'
+}
+
+@test "post-tool-use accumulates state and fires retry_thrash across calls" {
+  run_hook "$(pt_payload 'npm test' 'npm not found')" >/dev/null
+  run_hook "$(pt_payload 'npm test' 'npm not found')" >/dev/null
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c retry_thrash"
+  [ "$output" = "1" ]
+}
+
+@test "post-tool-use no-ops outside a pursuit" {
+  run bash -c "printf '{\"cwd\":\"$TMP\",\"tool_name\":\"Bash\"}' | '$REPO_ROOT/hooks/post-tool-use.sh'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "{}" ]
+}
+
+@test "post-tool-use no-ops for a terminal STATUS" {
+  printf 'stopped\n' > "$GOAL_DIR/STATUS"
+  run_hook "$(pt_payload 'npm test' 'npm not found')" >/dev/null
+  [ ! -f "$GOAL_DIR/detect-state.json" ]
+}
+
+@test "post-tool-use survives a malformed payload" {
+  run bash -c "printf 'garbage' | '$REPO_ROOT/hooks/post-tool-use.sh'"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e . >/dev/null
+}
+
+@test "post-tool-use writes no stderr on the happy path" {
+  run bash -c "printf '%s' '$(pt_payload 'npm test' 'npm not found')' | '$REPO_ROOT/hooks/post-tool-use.sh' 2>&1 1>/dev/null"
+  [ "$output" = "" ]
+}
+
+@test "scope_growth excludes pursue's own state directory" {
+  init_repo
+  mkdir -p "$PROJ/.agent/goals/$SLUG"
+  for i in $(seq 1 6); do printf 'x\n' > "$PROJ/.agent/goals/$SLUG/scratch$i.txt"; done
+  PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$PROJ"
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c scope_growth || true"
+  [ "$output" = "0" ]
+
+  mkdir -p "$PROJ/normal"
+  for i in $(seq 1 6); do printf 'x\n' > "$PROJ/normal/file$i.txt"; done
+  PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$PROJ"
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c scope_growth"
+  [ "$output" = "1" ]
+}

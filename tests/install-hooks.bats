@@ -405,3 +405,18 @@ JSON
   python3 -c "import tomllib,sys; tomllib.load(open(sys.argv[1],'rb'))" \
     "$FAKE_HOME/.codex/config.toml"
 }
+
+@test "--hooks registers PostToolUse for both harnesses" {
+  mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/.codex"
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  jq -e '.hooks.PostToolUse[0].hooks[0].command | contains("post-tool-use.sh")' "$SETTINGS"
+  jq -e '.hooks.PostToolUse[0].hooks[0].command | contains("post-tool-use.sh")' "$FAKE_HOME/.codex/hooks.json"
+}
+
+@test "--no-hooks removes PostToolUse too" {
+  mkdir -p "$FAKE_HOME/.claude"
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  "$REPO_ROOT/install.sh" --no-hooks >/dev/null
+  run jq '[.hooks.PostToolUse[]?.hooks[]? | select(.command | contains("post-tool-use.sh"))] | length' "$SETTINGS"
+  [ "$output" = "0" ]
+}
