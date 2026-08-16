@@ -130,7 +130,7 @@ while [[ $# -gt 0 ]]; do
       skill_dirs+=("$2")
       shift 2 ;;
     -h|--help)
-      sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//'
       exit 0 ;;
     --*)
       echo "error: unknown flag: $1" >&2
@@ -247,7 +247,7 @@ copy_payload() {
   local dest="$1"
   cp -r "$repo_root" "$dest"
   rm -rf "$dest/.git"
-  echo "$(repo_version)" > "$dest/.foobarto-skills"
+  repo_version > "$dest/.foobarto-skills"
 }
 
 # Check whether a destination is "ours": a symlink pointing at this repo, or
