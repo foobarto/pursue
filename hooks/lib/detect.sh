@@ -226,7 +226,11 @@ pursue_detect_churn() {
     *) printf '%s\n' "$state"; return 0 ;;
   esac
 
-  path="$(pursue_payload_raw tool_input | jq -r '.file_path // empty' 2>/dev/null)"
+  # A failed edit leaves the file untouched, so its hash matches the previous
+  # one and looks identical to a revert.  Only successful edits can churn.
+  [[ -z "$(pursue_error_fingerprint)" ]] || { printf '%s\n' "$state"; return 0; }
+
+  path="$(pursue_payload_raw tool_input | jq -r '.file_path // .notebook_path // empty' 2>/dev/null)"
   [[ -n "$path" && -r "$path" ]] || { printf '%s\n' "$state"; return 0; }
   hash="$(sha256sum "$path" 2>/dev/null | cut -c1-12)"
   [[ -n "$hash" ]] || { printf '%s\n' "$state"; return 0; }
@@ -256,7 +260,7 @@ pursue_detect_churn() {
 pursue_detect_scope() {
   local goal_dir="$1" root="$2" changed
   git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || return 0
-  changed="$(git -C "$root" status --porcelain 2>/dev/null | wc -l)"
+  changed="$(git -C "$root" status --porcelain --untracked-files=all 2>/dev/null | wc -l)"
   [[ "$changed" -gt "$PURSUE_SCOPE_MAX_FILES" ]] || return 0
   pursue_detect_trigger "$goal_dir" scope_growth \
     "$(jq -cn --argjson n "$changed" --argjson max "$PURSUE_SCOPE_MAX_FILES" \
@@ -267,13 +271,18 @@ pursue_detect_scope() {
 # which is a stronger signal than a command that never worked: something
 # that was true stopped being true.
 pursue_detect_verification() {
-  local goal_dir="$1" state="$2" tool cmd key prior fp
+  local goal_dir="$1" state="$2" tool cmd cwd key prior fp
   tool="$(pursue_payload_field tool_name)"
   [[ "$tool" == "Bash" ]] || { printf '%s\n' "$state"; return 0; }
 
   cmd="$(pursue_payload_raw tool_input | jq -r '.command // empty' 2>/dev/null)"
   [[ -n "$cmd" ]] || { printf '%s\n' "$state"; return 0; }
-  key="$(printf '%s' "$cmd" | sha256sum | cut -c1-12)"
+
+  # Include cwd in the key to distinguish the same command in different directories.
+  # This is imperfect — a cd inside a command still isn't reflected — but it is
+  # strictly more correct than command-text-only.
+  cwd="$(pursue_payload_field cwd)"
+  key="$(printf '%s\n%s' "$cwd" "$cmd" | sha256sum | cut -c1-12)"
 
   prior="$(printf '%s' "$state" | jq -r --arg k "$key" '(.verified[$k] // "")' 2>/dev/null)"
   fp="$(pursue_error_fingerprint)"

@@ -417,3 +417,44 @@ edit_payload() { printf '{"tool_name":"Edit","tool_input":{"file_path":"%s"},"to
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c verification_regression"
   [ "$output" = "1" ]
 }
+
+@test "edit_revert_churn does not fire on failed Edit calls" {
+  init_repo
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  PURSUE_PAYLOAD="$(edit_payload "$PROJ/a.txt")"
+  printf 'two\n' > "$PROJ/a.txt"; state="$(pursue_detect_churn "$GOAL_DIR" "$state" "$PROJ")"
+  PURSUE_PAYLOAD='{"tool_name":"Edit","tool_input":{"file_path":"'"$PROJ"'/a.txt"},"tool_response":"Error: old_string not found"}'
+  state="$(pursue_detect_churn "$GOAL_DIR" "$state" "$PROJ")"
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c edit_revert_churn || true"
+  [ "$output" = "0" ]
+}
+
+@test "edit_revert_churn fires for NotebookEdit reverting content" {
+  init_repo
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  PURSUE_PAYLOAD='{"tool_name":"NotebookEdit","tool_input":{"notebook_path":"'"$PROJ"'/a.txt"},"tool_response":{"stdout":"ok"}}'
+  printf 'two\n' > "$PROJ/a.txt"; state="$(pursue_detect_churn "$GOAL_DIR" "$state" "$PROJ")"
+  printf 'three\n' > "$PROJ/a.txt"; state="$(pursue_detect_churn "$GOAL_DIR" "$state" "$PROJ")"
+  printf 'two\n' > "$PROJ/a.txt"; state="$(pursue_detect_churn "$GOAL_DIR" "$state" "$PROJ")"
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c edit_revert_churn"
+  [ "$output" = "1" ]
+}
+
+@test "scope_growth detects untracked files in subdirectories" {
+  init_repo
+  mkdir -p "$PROJ/subdir"
+  for i in $(seq 1 6); do printf 'x\n' > "$PROJ/subdir/f$i.txt"; done
+  PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$PROJ"
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c scope_growth"
+  [ "$output" = "1" ]
+}
+
+@test "verification_regression does not fire when same command fails in different cwd" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  PURSUE_PAYLOAD='{"cwd":"/path/one","tool_name":"Bash","tool_input":{"command":"npm test"},"tool_response":{"stdout":"ok"}}'
+  state="$(pursue_detect_verification "$GOAL_DIR" "$state")"
+  PURSUE_PAYLOAD='{"cwd":"/path/two","tool_name":"Bash","tool_input":{"command":"npm test"},"tool_response":{"error":"FAIL"}}'
+  state="$(pursue_detect_verification "$GOAL_DIR" "$state")"
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c verification_regression || true"
+  [ "$output" = "0" ]
+}
