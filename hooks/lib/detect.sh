@@ -88,7 +88,46 @@ pursue_error_fingerprint() {
 
 PURSUE_DETECT_MAX_KEYS="${PURSUE_DETECT_MAX_KEYS:-200}"
 
+# How long to wait for the state lock before giving up on this call.
+PURSUE_DETECT_LOCK_WAIT="${PURSUE_DETECT_LOCK_WAIT:-5}"
+
 pursue_detect_state_path() { printf '%s/detect-state.json\n' "$1"; }
+pursue_detect_lock_path()  { printf '%s/detect-state.lock\n' "$1"; }
+
+# Run "$@" with the detector-state lock held, or not at all.
+#
+# The load-modify-save below is not atomic, and Claude Code batches
+# independent tool calls in parallel by default, so concurrent PostToolUse
+# hooks are the normal case rather than the edge case.  Measured with ten
+# identical failing calls: sequential gave a count of 10 and fired both
+# failure detectors; parallel gave a count of 1 and never created
+# triggers.jsonl at all.  pursue_detect_save's atomic rename prevents a torn
+# file; it does nothing about a lost update.
+#
+# Failing open here is deliberate and asymmetric.  A missed detection costs
+# one signal out of many; a hook that blocks costs the operator a wedged
+# tool call.  So no flock, an unwritable state directory, or a lock we
+# cannot take within the timeout all mean "skip detection for this call".
+pursue_detect_locked() {
+  local goal_dir="$1" lock
+  shift
+  command -v flock >/dev/null 2>&1 || return 0
+  lock="$(pursue_detect_lock_path "$goal_dir")"
+  # Guard the redirection instead of redirecting and hoping: a failed `9>`
+  # is reported while the redirection is being set up, so a 2>/dev/null
+  # inside the subshell can never cover it.  Same hazard common.sh
+  # documents for its -r guards.
+  if [[ -e "$lock" ]]; then
+    [[ -w "$lock" ]] || return 0
+  else
+    [[ -w "$goal_dir" ]] || return 0
+  fi
+  (
+    flock -w "$PURSUE_DETECT_LOCK_WAIT" 9 2>/dev/null || exit 0
+    "$@"
+  ) 9>"$lock"
+  return 0
+}
 
 # Print the detector state.  A missing or unparseable file yields a valid
 # empty state rather than an error: losing detector history is a degraded

@@ -556,3 +556,18 @@ pt_payload() {
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' | grep -c scope_growth"
   [ "$output" = "1" ]
 }
+
+# ---------------------------------------------------------------------------
+# PostToolUse under the harness's real concurrency
+# ---------------------------------------------------------------------------
+
+@test "parallel post-tool-use calls do not lose detector updates" {
+  payload="$(pt_payload 'npm test' 'npm not found')"
+  for _ in $(seq 1 10); do
+    # 3>&- so bats does not wait on the background jobs holding its fd 3.
+    printf '%s' "$payload" | "$REPO_ROOT/hooks/post-tool-use.sh" >/dev/null 2>&1 3>&- &
+  done
+  wait
+  run jq -r '.errors | to_entries[0].value' "$GOAL_DIR/detect-state.json"
+  [ "$output" = "10" ]
+}

@@ -19,8 +19,24 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/detect.sh
 . "$here/lib/detect.sh" 2>/dev/null || { printf '{}\n'; exit 0; }
 
+# The read-modify-write cycle, run under the state lock.  Everything it
+# produces is persisted to disk, so it does not need to hand anything back
+# to its caller — which is what lets the lock be a plain subshell.
+#
+# shellcheck disable=SC2317  # reached indirectly, as pursue_detect_locked's callback
+pursue_detect_cycle() {
+  local goal_dir="$1" root="$2" state
+
+  state="$(pursue_detect_load "$goal_dir")"
+  state="$(pursue_detect_failures "$goal_dir" "$state")"
+  state="$(pursue_detect_churn "$goal_dir" "$state" "$root")"
+  state="$(pursue_detect_verification "$goal_dir" "$state")"
+  pursue_detect_scope "$goal_dir" "$root"
+  pursue_detect_save "$goal_dir" "$state"
+}
+
 pursue_detect_main() {
-  local cwd root goal_dir status state
+  local cwd root goal_dir status
 
   pursue_read_payload
   pursue_have_jq || return 0
@@ -38,12 +54,7 @@ pursue_detect_main() {
   # accumulating detector history the operator never asked for.
   [[ "$status" == "active" ]] || return 0
 
-  state="$(pursue_detect_load "$goal_dir")"
-  state="$(pursue_detect_failures "$goal_dir" "$state")"
-  state="$(pursue_detect_churn "$goal_dir" "$state" "$root")"
-  state="$(pursue_detect_verification "$goal_dir" "$state")"
-  pursue_detect_scope "$goal_dir" "$root"
-  pursue_detect_save "$goal_dir" "$state"
+  pursue_detect_locked "$goal_dir" pursue_detect_cycle "$goal_dir" "$root"
   return 0
 }
 
