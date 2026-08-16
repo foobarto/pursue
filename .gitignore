@@ -8,3 +8,4 @@
 # docs/eps/; .agent/ is per-machine journal, decisions, and in-flight state.
 .tmp/
 .agent/
+.superpowers/
