@@ -61,7 +61,11 @@ pursue_plan_field() {
 pursue_tree_digest() {
   local root="$1" head diff
   if git -C "$root" rev-parse --git-dir >/dev/null 2>&1; then
-    head="$(git -C "$root" rev-parse HEAD 2>/dev/null || printf 'nohead')"
+    # --verify is load-bearing: plain `rev-parse HEAD` in a repo with no
+    # commits prints the literal string "HEAD" to *stdout* and exits 128, so
+    # the fallback would append to it rather than replace it and the anchor
+    # would render across two lines.  --verify prints nothing on failure.
+    head="$(git -C "$root" rev-parse --verify HEAD 2>/dev/null || printf 'nohead')"
     diff="$(git -C "$root" diff HEAD 2>/dev/null | sha256sum | cut -d' ' -f1)"
     printf '%.12s-%.12s\n' "$head" "$diff"
   else
