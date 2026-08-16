@@ -371,12 +371,14 @@ edit_payload() { printf '{"tool_name":"Edit","tool_input":{"file_path":"%s"},"to
   init_repo
   printf 'x\n' > "$PROJ/f1.txt"
   git -C "$PROJ" add -A
+  PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"touch f1.txt"},"tool_response":{"stdout":"ok"}}'
   PURSUE_SCOPE_MAX_FILES=10 pursue_detect_scope "$GOAL_DIR" "$PROJ"
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c scope_growth || true"
   [ "$output" = "0" ]
 }
 
 @test "scope_growth is silent outside a git repo" {
+  PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"touch x"},"tool_response":{"stdout":"ok"}}'
   run pursue_detect_scope "$GOAL_DIR" "$PROJ"
   [ "$status" -eq 0 ]
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c scope_growth || true"
