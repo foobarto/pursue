@@ -23,7 +23,11 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # produces is persisted to disk, so it does not need to hand anything back
 # to its caller — which is what lets the lock be a plain subshell.
 #
-# shellcheck disable=SC2317  # reached indirectly, as pursue_detect_locked's callback
+# SC2317/SC2329: reached indirectly, as pursue_detect_locked's callback.
+# Both codes are listed because which one fires depends on the shellcheck
+# version — 0.9.0 emits SC2317, newer releases emit SC2329 for the same
+# pattern.
+# shellcheck disable=SC2317,SC2329
 pursue_detect_cycle() {
   local goal_dir="$1" root="$2" session="$3" state
 
