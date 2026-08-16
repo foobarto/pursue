@@ -102,7 +102,9 @@ stay silent rather than fire.
 
 Hooks are opt-in — a plain `./install.sh` never touches your harness config.
 Registration merges into your existing config and leaves unrelated hooks
-alone. `jq` is required.
+alone. `jq` is required; `flock` is wanted but optional — without it
+detection still runs, it just cannot serialise its state file, so two tool
+calls finishing together can lose one of the two updates.
 
 **Claude Code** picks them up immediately. **Codex** additionally needs
 `[features] hooks = true` (the installer adds it) and will ask you to trust
@@ -196,6 +198,7 @@ five CLIs and `.claude/` belongs to one of them:
     STATUS            # active | paused | awaiting-confirmation | done | stopped
     triggers.jsonl    # hook heartbeats, detector triggers, verdict records
     detect-state.json # bounded detector counters (written by PostToolUse)
+    detect-state.lock # lock file serialising concurrent hook writes to it
     verdicts/         # reviewer verdicts, one file per anchor
   _archive/<slug>/    # stopped or done goals, kept for retros
 ```
