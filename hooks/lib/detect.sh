@@ -217,13 +217,21 @@ pursue_detect_trigger() {
 # ---------------------------------------------------------------------------
 
 pursue_detect_failures() {
-  local goal_dir="$1" state="$2" fp digest pair n
+  local goal_dir="$1" state="$2" root="$3" fp digest tree pair n
   fp="$(pursue_error_fingerprint)"
   # Empty fingerprint means the call succeeded — nothing to count.
   [[ -n "$fp" ]] || { printf '%s\n' "$state"; return 0; }
 
   digest="$(pursue_input_digest)"
-  pair="${fp}-${digest}"
+  # The tree digest is what makes "stopped changing anything" a claim this
+  # function actually checks.  Without it the pair key is command+error
+  # only, and the ordinary red-green loop — `npm test` fails, edit the
+  # source, `npm test` fails again — reads as thrash even though the worker
+  # changed the very thing under test.  Thrash is a *repeat against an
+  # unchanged tree*; anything else is just a failure that happens twice,
+  # which is what repeated_failure is for.
+  tree="$(pursue_tree_digest "$root")"
+  pair="${fp}-${digest}-${tree}"
 
   state="$(pursue_detect_bump "$state" errors "$fp")"
   n="$(pursue_detect_count "$state" errors "$fp")"
@@ -236,8 +244,8 @@ pursue_detect_failures() {
   n="$(pursue_detect_count "$state" pairs "$pair")"
   if [[ "$n" == "$PURSUE_THRASH_THRESHOLD" ]]; then
     pursue_detect_trigger "$goal_dir" retry_thrash \
-      "$(jq -cn --arg f "$fp" --arg d "$digest" --argjson c "$n" \
-           '{fingerprint: $f, input_digest: $d, count: $c}')"
+      "$(jq -cn --arg f "$fp" --arg d "$digest" --arg t "$tree" --argjson c "$n" \
+           '{fingerprint: $f, input_digest: $d, tree: $t, count: $c}')"
   fi
 
   printf '%s\n' "$state"

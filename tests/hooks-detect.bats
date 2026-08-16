@@ -228,7 +228,7 @@ fail_payload() { printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"tool
   state="$(pursue_detect_load "$GOAL_DIR")"
   for c in a b c; do
     PURSUE_PAYLOAD="$(fail_payload "$c" "npm not found")"
-    state="$(pursue_detect_failures "$GOAL_DIR" "$state")"
+    state="$(pursue_detect_failures "$GOAL_DIR" "$state" "$PROJ")"
   done
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c repeated_failure"
   [ "$output" = "1" ]
@@ -238,7 +238,7 @@ fail_payload() { printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"tool
   state="$(pursue_detect_load "$GOAL_DIR")"
   for c in a b; do
     PURSUE_PAYLOAD="$(fail_payload "$c" "npm not found")"
-    state="$(pursue_detect_failures "$GOAL_DIR" "$state")"
+    state="$(pursue_detect_failures "$GOAL_DIR" "$state" "$PROJ")"
   done
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c repeated_failure || true"
   [ "$output" = "0" ]
@@ -248,7 +248,7 @@ fail_payload() { printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"tool
   state="$(pursue_detect_load "$GOAL_DIR")"
   for c in a b c d e; do
     PURSUE_PAYLOAD="$(fail_payload "$c" "npm not found")"
-    state="$(pursue_detect_failures "$GOAL_DIR" "$state")"
+    state="$(pursue_detect_failures "$GOAL_DIR" "$state" "$PROJ")"
   done
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c repeated_failure"
   [ "$output" = "1" ]
@@ -258,7 +258,7 @@ fail_payload() { printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"tool
   state="$(pursue_detect_load "$GOAL_DIR")"
   for _ in 1 2; do
     PURSUE_PAYLOAD="$(fail_payload "npm test" "npm not found")"
-    state="$(pursue_detect_failures "$GOAL_DIR" "$state")"
+    state="$(pursue_detect_failures "$GOAL_DIR" "$state" "$PROJ")"
   done
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c retry_thrash"
   [ "$output" = "1" ]
@@ -268,7 +268,7 @@ fail_payload() { printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"tool
   state="$(pursue_detect_load "$GOAL_DIR")"
   for c in "npm test" "yarn test" "pnpm test"; do
     PURSUE_PAYLOAD="$(fail_payload "$c" "not found")"
-    state="$(pursue_detect_failures "$GOAL_DIR" "$state")"
+    state="$(pursue_detect_failures "$GOAL_DIR" "$state" "$PROJ")"
   done
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c retry_thrash || true"
   [ "$output" = "0" ]
@@ -278,7 +278,7 @@ fail_payload() { printf '{"tool_name":"Bash","tool_input":{"command":"%s"},"tool
   state="$(pursue_detect_load "$GOAL_DIR")"
   for _ in 1 2 3 4; do
     PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"go test ./..."},"tool_response":{"stdout":"ok"}}'
-    state="$(pursue_detect_failures "$GOAL_DIR" "$state")"
+    state="$(pursue_detect_failures "$GOAL_DIR" "$state" "$PROJ")"
   done
   [ ! -s "$GOAL_DIR/triggers.jsonl" ] || {
     run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | wc -l"
@@ -294,7 +294,7 @@ real_fail_payload() {
   state="$(pursue_detect_load "$GOAL_DIR")"
   for _ in 1 2; do
     PURSUE_PAYLOAD="$(real_fail_payload 'npm test')"
-    state="$(pursue_detect_failures "$GOAL_DIR" "$state")"
+    state="$(pursue_detect_failures "$GOAL_DIR" "$state" "$PROJ")"
   done
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c retry_thrash"
   [ "$output" = "1" ]
@@ -304,7 +304,7 @@ real_fail_payload() {
   state="$(pursue_detect_load "$GOAL_DIR")"
   for _ in 1 2 3 4; do
     PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"go test ./..."},"tool_response":{"stdout":"ok","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false}}'
-    state="$(pursue_detect_failures "$GOAL_DIR" "$state")"
+    state="$(pursue_detect_failures "$GOAL_DIR" "$state" "$PROJ")"
   done
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | wc -l"
   [ "$output" = "0" ]
@@ -624,4 +624,29 @@ pt_payload() {
 
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' | grep -c scope_growth"
   [ "$output" = "2" ]
+}
+
+# ---------------------------------------------------------------------------
+# retry_thrash means "unchanged tree", not merely "same command"
+# ---------------------------------------------------------------------------
+
+@test "retry_thrash does not fire when the tree changed between identical failures" {
+  init_repo
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  PURSUE_PAYLOAD="$(fail_payload 'npm test' 'assertion failed')"
+  state="$(pursue_detect_failures "$GOAL_DIR" "$state" "$PROJ")"
+  printf 'edited by the worker\n' > "$PROJ/a.txt"
+  state="$(pursue_detect_failures "$GOAL_DIR" "$state" "$PROJ")"
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c retry_thrash || true"
+  [ "$output" = "0" ]
+}
+
+@test "retry_thrash still fires when the tree is untouched between identical failures" {
+  init_repo
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  PURSUE_PAYLOAD="$(fail_payload 'npm test' 'assertion failed')"
+  state="$(pursue_detect_failures "$GOAL_DIR" "$state" "$PROJ")"
+  state="$(pursue_detect_failures "$GOAL_DIR" "$state" "$PROJ")"
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' | grep -c retry_thrash"
+  [ "$output" = "1" ]
 }

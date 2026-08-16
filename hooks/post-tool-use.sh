@@ -28,7 +28,7 @@ pursue_detect_cycle() {
   local goal_dir="$1" root="$2" state
 
   state="$(pursue_detect_load "$goal_dir")"
-  state="$(pursue_detect_failures "$goal_dir" "$state")"
+  state="$(pursue_detect_failures "$goal_dir" "$state" "$root")"
   state="$(pursue_detect_churn "$goal_dir" "$state" "$root")"
   state="$(pursue_detect_verification "$goal_dir" "$state")"
   state="$(pursue_detect_scope "$goal_dir" "$state" "$root")"
