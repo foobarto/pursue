@@ -176,3 +176,32 @@ msg_with() {
   run bash -c "jq -r 'select(.kind==\"session-heartbeat\") | .event' '$GOAL_DIR/triggers.jsonl' | tr '\n' ' '"
   [ "$output" = "SubagentStop " ]
 }
+
+# ---------------------------------------------------------------------------
+# Extraction takes the last complete block
+# ---------------------------------------------------------------------------
+
+@test "pursue_verdict_extract takes the last of two complete blocks" {
+  text="$(printf 'For example, a passing review looks like:\n\n```pursue-verdict\n{"verdict":"approve","reason":"the example from my brief"}\n```\n\nMy actual verdict:\n\n```pursue-verdict\n{"verdict":"stop","reason":"the tests do not run"}\n```\n')"
+  run pursue_verdict_extract "$text"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.verdict == "stop"'
+}
+
+@test "pursue_verdict_extract prefers a complete block over a later unclosed one" {
+  text="$(printf '```pursue-verdict\n{"verdict":"stop","reason":"the tests do not run"}\n```\n\nOops, half a block:\n\n```pursue-verdict\n{"verdict":"continue"\n')"
+  run pursue_verdict_extract "$text"
+  echo "$output" | jq -e '.verdict == "stop"'
+}
+
+@test "pursue_verdict_extract ignores an unterminated block before a complete one" {
+  text="$(printf 'Draft:\n\n```pursue-verdict\n{"verdict":"approve","reason":"draft"}\n\nActual:\n\n```pursue-verdict\n{"verdict":"stop","reason":"the tests do not run"}\n```\n')"
+  run pursue_verdict_extract "$text"
+  echo "$output" | jq -e '.verdict == "stop"'
+}
+
+@test "pursue_verdict_extract is empty when the only block is unterminated" {
+  text="$(printf 'Here you go:\n\n```pursue-verdict\n{"verdict":"continue","reason":"looks fine"}\n\nand some trailing prose\n')"
+  run pursue_verdict_extract "$text"
+  [ "$output" = "" ]
+}

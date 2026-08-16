@@ -21,12 +21,28 @@ PURSUE_VERDICT_TAG="${PURSUE_VERDICT_TAG:-pursue-verdict}"
 # staleness comparison actually reads.
 pursue_anchor_slug() { printf '%s\n' "${1//:/_}"; }
 
-# Print the contents of the tagged fenced block, or nothing.
+# Print the contents of the *last complete* tagged fenced block, or nothing.
+#
+# Last, not first: the next slice's reviewer brief contains an example
+# verdict block, and models echo their instructions routinely.  Taking the
+# first block meant a reviewer that quoted the example before giving its
+# real answer had the example recorded as its verdict — the worst possible
+# failure for this function, because the example is an approval.  The real
+# verdict is the one the reviewer arrived at, which is the last one.
+#
+# Complete, not merely opened: an unterminated block is not a candidate at
+# all, which is also what stops a truncated message from having its trailing
+# prose swallowed into a half-read verdict.
 pursue_verdict_extract() {
   printf '%s' "$1" | awk -v tag="$PURSUE_VERDICT_TAG" '
-    $0 ~ "^[[:space:]]*```" tag "[[:space:]]*$" { inblock = 1; next }
-    inblock && /^[[:space:]]*```[[:space:]]*$/   { exit }
-    inblock                                       { print }
+    $0 ~ "^[[:space:]]*```" tag "[[:space:]]*$" { inblock = 1; n = 0; next }
+    inblock && /^[[:space:]]*```[[:space:]]*$/ {
+      inblock = 0; complete = 1; kept = n
+      for (i = 1; i <= n; i++) block[i] = buf[i]
+      next
+    }
+    inblock { buf[++n] = $0; next }
+    END { if (complete) for (i = 1; i <= kept; i++) print block[i] }
   ' 2>/dev/null || true
 }
 
