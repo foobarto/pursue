@@ -581,44 +581,59 @@ install_hooks_codex() {
   echo "      It records that decision itself under [hooks.state] in config.toml."
 }
 
-# Is the hooks feature already enabled, under either valid TOML syntax:
-# `hooks = true` inside the [features] table, or a top-level `features.hooks
-# = true` dotted key (only meaningful before the first table header — once
-# any [section] appears, a later `features.hooks = ...` line belongs to that
-# section, not to the top-level table).  A plain `hooks = true` line under
-# some unrelated table (e.g. [some.other]) must NOT count — that was the
-# bug: a naive whole-file grep for the key name, ignoring which table it
-# lives in, silently treated an unrelated section's `hooks = true` as ours
-# and skipped writing the real [features] gate, so the hooks we register
-# would silently never fire.
+# Both predicates below match against `h`: the line with every space and tab
+# removed.  TOML permits whitespace almost anywhere a value is expected, so
+# `[ features ]` and `[features]` are the same table and `features={hooks=
+# true}` and `features = { hooks = true }` are the same key.  Matching the
+# raw line meant a spaced variant slipped past both checks and we appended a
+# second [features] definition, which is a TOML error ("Cannot declare
+# ('features',) twice") — we would break the whole config, not just our
+# feature.  Normalising first is what makes the two checks agree with the
+# parser instead of with a particular spelling.
+
+# Is the hooks feature already enabled, under any of the three valid TOML
+# spellings: `hooks = true` inside the [features] table, a top-level
+# `features.hooks = true` dotted key, or a top-level `features = { hooks =
+# true }` inline table.  The two top-level forms are only meaningful before
+# the first table header — once any [section] appears, a later `features.x`
+# line belongs to that section, not to the top-level table.
+#
+# A plain `hooks = true` line under some unrelated table (e.g. [some.other])
+# must NOT count — that was the original bug: a naive whole-file grep for
+# the key name, ignoring which table it lives in, silently treated an
+# unrelated section's `hooks = true` as ours and skipped writing the real
+# [features] gate, so the hooks we register would silently never fire.
 codex_hooks_feature_enabled() {
   awk '
-    /^[[:space:]]*\[/ {
+    { h = $0; gsub(/[ \t]/, "", h) }
+    h ~ /^\[/ {
       seen_section = 1
-      in_features = ($0 ~ /^[[:space:]]*\[features\][[:space:]]*(#.*)?$/)
+      in_features = (h ~ /^\[features\](#.*)?$/)
       next
     }
-    !seen_section && /^[[:space:]]*features\.hooks[[:space:]]*=[[:space:]]*true[[:space:]]*(#.*)?$/ { found = 1 }
-    in_features && /^[[:space:]]*hooks[[:space:]]*=[[:space:]]*true[[:space:]]*(#.*)?$/ { found = 1 }
+    !seen_section && h ~ /^features\.hooks=true(#.*)?$/ { found = 1 }
+    !seen_section && h ~ /^features=[{]/ && h ~ /[{,]hooks=true[,}]/ { found = 1 }
+    in_features && h ~ /^hooks=true(#.*)?$/ { found = 1 }
     END { exit found ? 0 : 1 }
   ' "$1"
 }
 
-# Is there a [features] table header anywhere, or a top-level features.*
-# dotted key (before the first table header), regardless of whether it sets
-# hooks?  Used to decide "warn, don't touch" vs "safe to append a new
-# [features] table".  Appending a [features] header when a top-level
-# features.* dotted key already exists would be a TOML redefinition error
-# and break the user's whole config, not just our feature — so that case
-# must also count as "present" and go to the warn branch, never the append.
+# Is there a [features] table header anywhere, or a top-level `features.`
+# dotted key or `features =` assignment (before the first table header),
+# regardless of whether it sets hooks?  Used to decide "warn, don't touch"
+# vs "safe to append a new [features] table".  Appending a [features] header
+# when the key is already defined in any of those forms would be a TOML
+# redefinition error, so every one of them must count as "present" and go to
+# the warn branch, never the append.
 codex_features_present() {
   awk '
-    /^[[:space:]]*\[/ {
+    { h = $0; gsub(/[ \t]/, "", h) }
+    h ~ /^\[/ {
       seen_section = 1
-      if ($0 ~ /^[[:space:]]*\[features\][[:space:]]*(#.*)?$/) found = 1
+      if (h ~ /^\[features\](#.*)?$/) found = 1
       next
     }
-    !seen_section && /^[[:space:]]*features\./ { found = 1 }
+    !seen_section && h ~ /^features[.=]/ { found = 1 }
     END { exit found ? 0 : 1 }
   ' "$1"
 }

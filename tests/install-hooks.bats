@@ -190,6 +190,46 @@ JSON
   [ "$(grep -c '^\[features\]' "$FAKE_HOME/.codex/config.toml")" -eq 0 ]
 }
 
+# A [features] header may carry interior whitespace and still be the same
+# table; appending a second one makes the file unparseable ("Cannot declare
+# ('features',) twice").
+@test "--hooks leaves a spaced [ features ] header alone and keeps the file parseable" {
+  mkdir -p "$FAKE_HOME/.codex"
+  printf '[ features ]\nhooks = true\n' > "$FAKE_HOME/.codex/config.toml"
+  before="$(cat "$FAKE_HOME/.codex/config.toml")"
+  run "$REPO_ROOT/install.sh" --hooks
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE_HOME/.codex/config.toml")" = "$before" ]
+  python3 -c "import tomllib,sys; d=tomllib.load(open(sys.argv[1],'rb')); assert d['features']['hooks'] is True, d" \
+    "$FAKE_HOME/.codex/config.toml"
+}
+
+# `features = { hooks = true }` is an inline table: the feature is already
+# enabled, and appending a [features] header would redefine the key.
+@test "--hooks leaves an inline features table alone and keeps the file parseable" {
+  mkdir -p "$FAKE_HOME/.codex"
+  printf 'features = { hooks = true }\nmodel = "gpt-5"\n' > "$FAKE_HOME/.codex/config.toml"
+  before="$(cat "$FAKE_HOME/.codex/config.toml")"
+  run "$REPO_ROOT/install.sh" --hooks
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE_HOME/.codex/config.toml")" = "$before" ]
+  [[ "$output" != *"[features] exists"* ]]
+  python3 -c "import tomllib,sys; d=tomllib.load(open(sys.argv[1],'rb')); assert d['features']['hooks'] is True, d; assert d['model']=='gpt-5', d" \
+    "$FAKE_HOME/.codex/config.toml"
+}
+
+# An inline table that does NOT enable hooks must warn, never append.
+@test "--hooks warns on an inline features table without hooks rather than redefining it" {
+  mkdir -p "$FAKE_HOME/.codex"
+  printf 'features = { other = true }\n' > "$FAKE_HOME/.codex/config.toml"
+  before="$(cat "$FAKE_HOME/.codex/config.toml")"
+  run "$REPO_ROOT/install.sh" --hooks
+  [ "$status" -eq 0 ]
+  [ "$(cat "$FAKE_HOME/.codex/config.toml")" = "$before" ]
+  python3 -c "import tomllib,sys; tomllib.load(open(sys.argv[1],'rb'))" \
+    "$FAKE_HOME/.codex/config.toml"
+}
+
 @test "--hooks warns and does not rewrite when [features] exists without hooks" {
   mkdir -p "$FAKE_HOME/.codex"
   printf '[features]\nother = 1\n' > "$FAKE_HOME/.codex/config.toml"
