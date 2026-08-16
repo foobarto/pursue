@@ -31,7 +31,7 @@ pursue_detect_cycle() {
   state="$(pursue_detect_failures "$goal_dir" "$state")"
   state="$(pursue_detect_churn "$goal_dir" "$state" "$root")"
   state="$(pursue_detect_verification "$goal_dir" "$state")"
-  pursue_detect_scope "$goal_dir" "$root"
+  state="$(pursue_detect_scope "$goal_dir" "$state" "$root")"
   pursue_detect_save "$goal_dir" "$state"
 }
 

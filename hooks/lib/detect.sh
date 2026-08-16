@@ -133,11 +133,11 @@ pursue_detect_locked() {
 # empty state rather than an error: losing detector history is a degraded
 # detector, but a hook that fails on it is a broken session.
 pursue_detect_load() {
-  local f empty='{"version":1,"errors":{},"pairs":{},"files":{},"verified":{}}'
+  local f empty='{"version":1,"errors":{},"pairs":{},"files":{},"verified":{},"scope":{}}'
   f="$(pursue_detect_state_path "$1")"
   if [[ -r "$f" ]] && jq -e '
       .version == 1
-      and ([.errors, .pairs, .files, .verified]
+      and ([.errors, .pairs, .files, .verified, .scope]
            | all(. == null or type == "object"))
     ' "$f" >/dev/null 2>&1; then
     jq -c '.' "$f" 2>/dev/null || printf '%s\n' "$empty"
@@ -296,8 +296,17 @@ pursue_detect_churn() {
 # the contract flow lands there is no declared scope at all, and a detector
 # that silently does nothing in that case would be the same mistake as
 # shipping a hook whose inputs nobody writes.
+# Unlike its siblings this detector's input is a *level*, not an event, and
+# that is why it needs state at all.  A counter cannot skip past a
+# threshold, so "fire when the count reaches N" is self-limiting.  A level
+# can sit above its threshold indefinitely: without the `fired` flag, every
+# subsequent Edit/Write/Bash appended another scope_growth trigger for as
+# long as the tree stayed large — 20 changed files and 5 edits gave 5
+# triggers.  In the next slice each trigger demands a review, so that is a
+# block the worker cannot clear by working.  Fire once on the crossing,
+# re-arm only when the count drops back under the threshold.
 pursue_detect_scope() {
-  local goal_dir="$1" root="$2" tool changed
+  local goal_dir="$1" state="$2" root="$3" tool changed fired
 
   # Only tools that can change the working tree are worth a git call.  This
   # runs after every tool call in an active pursuit, and `-uall` walks the
@@ -308,19 +317,29 @@ pursue_detect_scope() {
   tool="$(pursue_payload_field tool_name)"
   case "$tool" in
     Edit|Write|MultiEdit|NotebookEdit|Bash) ;;
-    *) return 0 ;;
+    *) printf '%s\n' "$state"; return 0 ;;
   esac
 
-  git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || { printf '%s\n' "$state"; return 0; }
   # Exclude pursue's own state: a project that does not gitignore .agent/ would
   # otherwise count this hook's own bookkeeping as scope creep, and in the next
   # slice each verdict is a new file — a long pursuit would trip its own
   # detector and demand reviews about its own record-keeping.
   changed="$(git -C "$root" status --porcelain --untracked-files=all -- ':(exclude).agent' 2>/dev/null | wc -l)"
-  [[ "$changed" -gt "$PURSUE_SCOPE_MAX_FILES" ]] || return 0
-  pursue_detect_trigger "$goal_dir" scope_growth \
-    "$(jq -cn --argjson n "$changed" --argjson max "$PURSUE_SCOPE_MAX_FILES" \
-         '{changed_files: $n, threshold: $max, basis: "file-count fallback"}')"
+  fired="$(printf '%s' "$state" | jq -r '(.scope.fired // false)' 2>/dev/null || printf 'false')"
+
+  if [[ "$changed" -gt "$PURSUE_SCOPE_MAX_FILES" ]]; then
+    if [[ "$fired" != "true" ]]; then
+      pursue_detect_trigger "$goal_dir" scope_growth \
+        "$(jq -cn --argjson n "$changed" --argjson max "$PURSUE_SCOPE_MAX_FILES" \
+             '{changed_files: $n, threshold: $max, basis: "file-count fallback"}')"
+      state="$(printf '%s' "$state" | jq -c '.scope = {fired: true}' 2>/dev/null || printf '%s' "$state")"
+    fi
+  elif [[ "$fired" == "true" ]]; then
+    state="$(printf '%s' "$state" | jq -c '.scope = {fired: false}' 2>/dev/null || printf '%s' "$state")"
+  fi
+
+  printf '%s\n' "$state"
 }
 
 # A shell command that previously succeeded and now fails is a regression,

@@ -361,8 +361,9 @@ edit_payload() { printf '{"tool_name":"Edit","tool_input":{"file_path":"%s"},"to
   init_repo
   for i in $(seq 1 6); do printf 'x\n' > "$PROJ/f$i.txt"; done
   git -C "$PROJ" add -A
+  state="$(pursue_detect_load "$GOAL_DIR")"
   PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"true"},"tool_response":{"stdout":"ok"}}'
-  PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$PROJ"
+  PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$state" "$PROJ"
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c scope_growth"
   [ "$output" = "1" ]
 }
@@ -371,15 +372,17 @@ edit_payload() { printf '{"tool_name":"Edit","tool_input":{"file_path":"%s"},"to
   init_repo
   printf 'x\n' > "$PROJ/f1.txt"
   git -C "$PROJ" add -A
+  state="$(pursue_detect_load "$GOAL_DIR")"
   PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"touch f1.txt"},"tool_response":{"stdout":"ok"}}'
-  PURSUE_SCOPE_MAX_FILES=10 pursue_detect_scope "$GOAL_DIR" "$PROJ"
+  PURSUE_SCOPE_MAX_FILES=10 pursue_detect_scope "$GOAL_DIR" "$state" "$PROJ"
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c scope_growth || true"
   [ "$output" = "0" ]
 }
 
 @test "scope_growth is silent outside a git repo" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
   PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"touch x"},"tool_response":{"stdout":"ok"}}'
-  run pursue_detect_scope "$GOAL_DIR" "$PROJ"
+  run pursue_detect_scope "$GOAL_DIR" "$state" "$PROJ"
   [ "$status" -eq 0 ]
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c scope_growth || true"
   [ "$output" = "0" ]
@@ -447,8 +450,9 @@ edit_payload() { printf '{"tool_name":"Edit","tool_input":{"file_path":"%s"},"to
   init_repo
   mkdir -p "$PROJ/subdir"
   for i in $(seq 1 6); do printf 'x\n' > "$PROJ/subdir/f$i.txt"; done
+  state="$(pursue_detect_load "$GOAL_DIR")"
   PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"true"},"tool_response":{"stdout":"ok"}}'
-  PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$PROJ"
+  PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$state" "$PROJ"
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c scope_growth"
   [ "$output" = "1" ]
 }
@@ -525,16 +529,17 @@ pt_payload() {
 
 @test "scope_growth excludes pursue's own state directory" {
   init_repo
+  state="$(pursue_detect_load "$GOAL_DIR")"
   PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"true"},"tool_response":{"stdout":"ok"}}'
   mkdir -p "$PROJ/.agent/goals/$SLUG"
   for i in $(seq 1 6); do printf 'x\n' > "$PROJ/.agent/goals/$SLUG/scratch$i.txt"; done
-  PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$PROJ"
+  state="$(PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$state" "$PROJ")"
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c scope_growth || true"
   [ "$output" = "0" ]
 
   mkdir -p "$PROJ/normal"
   for i in $(seq 1 6); do printf 'x\n' > "$PROJ/normal/file$i.txt"; done
-  PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$PROJ"
+  state="$(PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$state" "$PROJ")"
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c scope_growth"
   [ "$output" = "1" ]
 }
@@ -542,8 +547,9 @@ pt_payload() {
 @test "scope_growth ignores read-only tools" {
   init_repo
   mkdir -p "$PROJ/src"; for i in $(seq 1 20); do : > "$PROJ/src/f$i.js"; done
+  state="$(pursue_detect_load "$GOAL_DIR")"
   PURSUE_PAYLOAD='{"tool_name":"Read","tool_input":{"file_path":"/x"},"tool_response":{"stdout":"ok"}}'
-  PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$PROJ"
+  PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$state" "$PROJ"
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c scope_growth || true"
   [ "$output" = "0" ]
 }
@@ -551,8 +557,9 @@ pt_payload() {
 @test "scope_growth still fires for a mutating tool" {
   init_repo
   mkdir -p "$PROJ/src"; for i in $(seq 1 20); do : > "$PROJ/src/f$i.js"; done
+  state="$(pursue_detect_load "$GOAL_DIR")"
   PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"touch x"},"tool_response":{"stdout":"ok"}}'
-  PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$PROJ"
+  PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$state" "$PROJ"
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' | grep -c scope_growth"
   [ "$output" = "1" ]
 }
@@ -585,4 +592,36 @@ pt_payload() {
   [ "$output" = "{}" ]
   [ ! -f "$GOAL_DIR/detect-state.json" ]
   [ ! -f "$GOAL_DIR/triggers.jsonl" ]
+}
+
+# ---------------------------------------------------------------------------
+# scope_growth is a level, not an event (fire-once + re-arm)
+# ---------------------------------------------------------------------------
+
+@test "scope_growth fires once while the tree stays over the threshold" {
+  init_repo
+  mkdir -p "$PROJ/src"; for i in $(seq 1 20); do : > "$PROJ/src/f$i.js"; done
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  PURSUE_PAYLOAD='{"tool_name":"Edit","tool_input":{"file_path":"/x"},"tool_response":{"stdout":"ok"}}'
+  for _ in 1 2 3 4 5; do
+    state="$(PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$state" "$PROJ")"
+  done
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' | grep -c scope_growth"
+  [ "$output" = "1" ]
+}
+
+@test "scope_growth re-arms after the tree drops back under the threshold" {
+  init_repo
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  PURSUE_PAYLOAD='{"tool_name":"Edit","tool_input":{"file_path":"/x"},"tool_response":{"stdout":"ok"}}'
+
+  mkdir -p "$PROJ/src"; for i in $(seq 1 20); do : > "$PROJ/src/f$i.js"; done
+  state="$(PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$state" "$PROJ")"
+  rm -rf "$PROJ/src"
+  state="$(PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$state" "$PROJ")"
+  mkdir -p "$PROJ/src"; for i in $(seq 1 20); do : > "$PROJ/src/f$i.js"; done
+  state="$(PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$state" "$PROJ")"
+
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' | grep -c scope_growth"
+  [ "$output" = "2" ]
 }
