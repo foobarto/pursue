@@ -646,7 +646,7 @@ install_hooks_codex() {
 # [features] gate, so the hooks we register would silently never fire.
 codex_hooks_feature_enabled() {
   awk '
-    { h = $0; gsub(/[ \t]/, "", h) }
+    { h = $0; gsub(/[ \t\r]/, "", h) }
     h ~ /^\[/ {
       seen_section = 1
       in_features = (h ~ /^\[features\](#.*)?$/)
@@ -668,7 +668,7 @@ codex_hooks_feature_enabled() {
 # the warn branch, never the append.
 codex_features_present() {
   awk '
-    { h = $0; gsub(/[ \t]/, "", h) }
+    { h = $0; gsub(/[ \t\r]/, "", h) }
     h ~ /^\[/ {
       seen_section = 1
       if (h ~ /^\[features\](#.*)?$/) found = 1

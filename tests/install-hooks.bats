@@ -371,3 +371,35 @@ JSON
   [ "$(cat "$FAKE_HOME/.codex/config.toml")" = "$before" ]
   [ "$(grep -c '^\[features\]' "$FAKE_HOME/.codex/config.toml")" -eq 1 ]
 }
+
+# CRLF regression: the whitespace normalisation in codex_hooks_feature_enabled
+# / codex_features_present used to strip [[:space:]] (which includes \r) and
+# was narrowed to gsub(/[ \t]/, ...) to fix a different bug. That narrowing
+# dropped \r, so a CRLF config.toml matched neither predicate, fell through
+# to the append branch, and gained a second [features] table -> unparseable.
+# byte-for-byte comparison via cmp is the strongest available assertion that
+# the file was never touched.
+@test "--hooks recognises a CRLF [features] hooks = true header and leaves the file byte-identical" {
+  mkdir -p "$FAKE_HOME/.codex"
+  printf '[features]\r\nhooks = true\r\n' > "$FAKE_HOME/.codex/config.toml"
+  cp "$FAKE_HOME/.codex/config.toml" "$FAKE_HOME/before.toml"
+  run "$REPO_ROOT/install.sh" --hooks
+  [ "$status" -eq 0 ]
+  cmp -s "$FAKE_HOME/before.toml" "$FAKE_HOME/.codex/config.toml"
+  [ "$(grep -c '^\[features\]' "$FAKE_HOME/.codex/config.toml")" -eq 1 ]
+  python3 -c "import tomllib,sys; d=tomllib.load(open(sys.argv[1],'rb')); assert d['features']['hooks'] is True, d" \
+    "$FAKE_HOME/.codex/config.toml"
+}
+
+@test "--hooks warns without rewriting a CRLF [features] table that lacks hooks" {
+  mkdir -p "$FAKE_HOME/.codex"
+  printf '[features]\r\nother = 1\r\n' > "$FAKE_HOME/.codex/config.toml"
+  cp "$FAKE_HOME/.codex/config.toml" "$FAKE_HOME/before.toml"
+  run "$REPO_ROOT/install.sh" --hooks
+  [ "$status" -eq 0 ]
+  cmp -s "$FAKE_HOME/before.toml" "$FAKE_HOME/.codex/config.toml"
+  [ "$(grep -c '^\[features\]' "$FAKE_HOME/.codex/config.toml")" -eq 1 ]
+  [[ "$output" == *"warn: [features] exists in"* ]]
+  python3 -c "import tomllib,sys; tomllib.load(open(sys.argv[1],'rb'))" \
+    "$FAKE_HOME/.codex/config.toml"
+}
