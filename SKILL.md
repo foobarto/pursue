@@ -130,7 +130,7 @@ This is the highest-cost area to get wrong. The autonomous loop runs without ope
 - **Same-approach loops** — iteration N+1 is a tweaked retry of N which already hit a wall. Switch perspective, switch level, or ask one question. Don't retry the same approach with different settings.
 - **Cache thrash on wakeup** — `delaySeconds: 300` is the worst-of-both option. Stay ≤270 or commit to ≥1200.
 - **Cross-pursuit contamination** — only one active pursuit per project. Don't try to run two simultaneously.
-- **Sensitive output in tracked files** — `progress.md` is tracked. Credentials, internal stakeholder names, third-party data go in `.claude/notes/brainstorms/` (gitignored) and `progress.md` references the path. Re-audit `.agent/.gitignore` whenever a new sensitive pattern appears.
+- **Sensitive output in tracked files** — `progress.md` is tracked. Credentials, internal stakeholder names, third-party data go in `.agent/notes/brainstorms/` (gitignored) and `progress.md` references the path. Re-audit `.agent/.gitignore` whenever a new sensitive pattern appears.
 - **Skipping pre-flight stop scan** — the loop is autonomous; missed stop signals mean wasted work and operator frustration. Pre-flight scan is non-negotiable.
 - **Auto-approving destructive actions** — never. The operator's CLAUDE.md requires per-action confirmation for destructive moves. The loop pauses (sets `STATUS=paused`) when the next action would be destructive and asks the operator.
 
