@@ -96,7 +96,11 @@ pursue_detect_state_path() { printf '%s/detect-state.json\n' "$1"; }
 pursue_detect_load() {
   local f empty='{"version":1,"errors":{},"pairs":{},"files":{},"verified":{}}'
   f="$(pursue_detect_state_path "$1")"
-  if [[ -r "$f" ]] && jq -e '.version == 1' "$f" >/dev/null 2>&1; then
+  if [[ -r "$f" ]] && jq -e '
+      .version == 1
+      and ([.errors, .pairs, .files, .verified]
+           | all(. == null or type == "object"))
+    ' "$f" >/dev/null 2>&1; then
     jq -c '.' "$f" 2>/dev/null || printf '%s\n' "$empty"
   else
     printf '%s\n' "$empty"
@@ -127,7 +131,7 @@ pursue_detect_bump() {
       .[$c] //= {}
       | .[$c][$k] = ((.[$c][$k] // 0) + 1)
       | if (.[$c] | length) > $max
-        then .[$c] = (.[$c] | to_entries | .[(($max / 2) | floor):] | from_entries)
+        then .[$c] = (.[$c] | to_entries | .[([1, (($max / 2) | floor)] | max):] | from_entries)
         else . end
     ' 2>/dev/null || printf '%s' "$1"
 }

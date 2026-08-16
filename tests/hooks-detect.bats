@@ -169,3 +169,28 @@ teardown() { rm -rf "$TMP"; }
   run bash -c "printf '%s' '$state' | jq '.errors | length'"
   [ "$output" -le 10 ]
 }
+
+@test "detector state is bounded even at max=1" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  for i in $(seq 1 8); do
+    state="$(PURSUE_DETECT_MAX_KEYS=1 pursue_detect_bump "$state" errors "key$i")"
+  done
+  run bash -c "printf '%s' '$state' | jq '.errors | length'"
+  [ "$output" -le 1 ]
+}
+
+@test "pursue_detect_load rejects corrupt collection types" {
+  printf '{"version":1,"errors":[1,2,3]}' > "$GOAL_DIR/detect-state.json"
+  run pursue_detect_load "$GOAL_DIR"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.version == 1'
+  echo "$output" | jq -e '.errors == {}'
+}
+
+@test "pursue_detect_save cleans up temp file on jq failure" {
+  state="not valid json for jq"
+  pursue_detect_save "$GOAL_DIR" "$state"
+  run bash -c "ls '$GOAL_DIR'/detect-state.json.* 2>/dev/null | wc -l"
+  [ "$output" = "0" ]
+  [[ ! -f "$GOAL_DIR/detect-state.json" ]]
+}
