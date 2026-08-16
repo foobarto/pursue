@@ -412,7 +412,7 @@ pursue_detect_churn() {
 # block the worker cannot clear by working.  Fire once on the crossing,
 # re-arm only when the count drops back under the threshold.
 pursue_detect_scope() {
-  local goal_dir="$1" state="$2" root="$3" tool changed fired
+  local goal_dir="$1" state="$2" root="$3" tool porcelain changed fired
 
   # Only tools that can change the working tree are worth a git call.  This
   # runs after every tool call in an active pursuit, and `-uall` walks the
@@ -431,10 +431,24 @@ pursue_detect_scope() {
   # otherwise count this hook's own bookkeeping as scope creep, and in the next
   # slice each verdict is a new file — a long pursuit would trip its own
   # detector and demand reviews about its own record-keeping.
-  # tr, because `wc -l` pads its count with leading blanks on the BSD
-  # userland and the guarded comparison below accepts digits only — an
-  # unstripped count would make this detector silently no-op there.
-  changed="$(git -C "$root" status --porcelain --untracked-files=all -- ':(exclude).agent' 2>/dev/null | wc -l | tr -d '[:space:]')"
+  #
+  # Capture git's exit status instead of piping straight into `wc -l`, which
+  # swallows it: a failed `git status` then reads as "0 changed files", takes
+  # the re-arm branch below, and lets scope_growth fire a second time for the
+  # same crossing as soon as git recovers — with the tree unchanged
+  # throughout.  Demonstrated with a corrupt index; in the next slice that
+  # second trigger is a second review demand the worker cannot clear by
+  # working.  A failure is no evidence about scope either way, so neither fire
+  # nor re-arm: hand the state back exactly as it came in.
+  if ! porcelain="$(git -C "$root" status --porcelain --untracked-files=all -- ':(exclude).agent' 2>/dev/null)"; then
+    printf '%s\n' "$state"; return 0
+  fi
+  # Command substitution already stripped the trailing newline, so an empty
+  # result has to be counted as 0 rather than as one line.  tr, because `wc`
+  # pads its count with blanks on the BSD userland and the guarded comparison
+  # below accepts digits only.
+  changed=0
+  [[ -z "$porcelain" ]] || changed="$(printf '%s\n' "$porcelain" | wc -l | tr -d '[:space:]')"
   fired="$(printf '%s' "$state" | jq -r '(.scope.fired // false)' 2>/dev/null || printf 'false')"
 
   if pursue_is_uint "$changed" && pursue_is_uint "$PURSUE_SCOPE_MAX_FILES" \

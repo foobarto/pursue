@@ -626,6 +626,34 @@ pt_payload() {
   [ "$output" = "2" ]
 }
 
+# A transient git failure is not evidence that the tree shrank.  Reading it as
+# "0 changed files" cleared the fired flag, and the detector then fired a
+# second time for a crossing it had already reported — a duplicate review
+# demand in the next slice, against a tree the worker never touched.
+@test "a failing git status neither fires nor re-arms scope_growth" {
+  init_repo
+  mkdir -p "$PROJ/src"; for i in $(seq 1 20); do : > "$PROJ/src/f$i.js"; done
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  PURSUE_PAYLOAD='{"tool_name":"Edit","tool_input":{"file_path":"/x"},"tool_response":{"stdout":"ok"}}'
+  state="$(PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$state" "$PROJ")"
+  echo "$state" | jq -e '.scope.fired == true'
+
+  # A corrupt index fails `git status` while `git rev-parse --git-dir` still
+  # succeeds — the shape of the transient failure this detector has to ride
+  # out rather than treat as news about the tree.
+  cp "$PROJ/.git/index" "$TMP/index.good"
+  printf 'garbage' > "$PROJ/.git/index"
+  run git -C "$PROJ" status --porcelain
+  [ "$status" -ne 0 ]
+  state="$(PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$state" "$PROJ")"
+  echo "$state" | jq -e '.scope.fired == true'
+
+  cp "$TMP/index.good" "$PROJ/.git/index"
+  state="$(PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$state" "$PROJ")"
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' | grep -c scope_growth"
+  [ "$output" = "1" ]
+}
+
 # ---------------------------------------------------------------------------
 # retry_thrash means "unchanged tree", not merely "same command"
 # ---------------------------------------------------------------------------
