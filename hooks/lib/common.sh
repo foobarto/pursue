@@ -119,3 +119,82 @@ pursue_heartbeat() {
   printf '{"ts":"%s","event":"%s","kind":"heartbeat"}\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" >> "$1/triggers.jsonl" 2>/dev/null || true
 }
+
+# ---------------------------------------------------------------------------
+# Context assembly
+#
+# This is the reduced form of EP-0062's "keep the promises somewhere
+# forgetting cannot edit them".  It is the highest-value thing these hooks
+# do: it is what makes a pursuit survive a session reset without depending
+# on the worker remembering to re-read its own state.
+# ---------------------------------------------------------------------------
+
+# Print the last N "## " sections of progress.md.
+pursue_progress_tail() {
+  local f="$1/progress.md"
+  [[ -f "$f" ]] || return 0
+  awk -v n="$2" '
+    /^## / { c++; start[c] = NR }
+    { line[NR] = $0 }
+    END {
+      from = (c > n) ? start[c - n + 1] : 1
+      for (i = from; i <= NR; i++) print line[i]
+    }
+  ' "$f"
+}
+
+# Print the active plan step and its done condition.  Injecting only the
+# active step is deliberate: exactly one step is active, and showing the
+# whole plan invites the worker to work ahead of it.
+pursue_active_step_text() {
+  jq -r '
+    (.active_step // null) as $i
+    | if $i == null or (.steps | length) <= $i then "(no active step)"
+      else "[\($i)] \(.steps[$i].title // "(unnamed)")\n    done when: \(.steps[$i].done_when // "(unspecified)")"
+      end
+  ' "$1/plan.json" 2>/dev/null || printf '(no plan.json)\n'
+}
+
+# Assemble the full injected block: contract, anchor, active step,
+# blockers, recent progress.
+pursue_context_block() {
+  local root="$1" goal_dir="$2" status="$3" event="$4"
+  printf '# Active pursuit — injected by the pursue %s hook\n\n' "$event"
+  printf 'Status: %s\n' "$status"
+  printf 'Anchor: %s\n' "$(pursue_anchor "$root" "$goal_dir")"
+  printf 'State:  %s\n\n' "$goal_dir"
+  printf -- '--- contract (goal.md) ---\n'
+  cat "$goal_dir/goal.md" 2>/dev/null
+  printf -- '\n--- active plan step ---\n'
+  pursue_active_step_text "$goal_dir"
+  if [[ -s "$goal_dir/blockers.md" ]]; then
+    printf -- '\n--- open blockers ---\n'
+    cat "$goal_dir/blockers.md"
+  fi
+  printf -- '\n--- last %s progress entries ---\n' "$PURSUE_PROGRESS_TAIL"
+  pursue_progress_tail "$goal_dir" "$PURSUE_PROGRESS_TAIL"
+}
+
+# Shared entrypoint body for the injection hooks.  Both SessionStart and
+# PreCompact do exactly this; only the event name differs.
+pursue_inject_main() {
+  local event="$1" cwd root goal_dir status
+
+  pursue_read_payload
+  pursue_have_jq || { pursue_emit_noop; return 0; }
+
+  cwd="$(pursue_payload_field cwd)"
+  [[ -n "$cwd" ]] || cwd="$PWD"
+
+  root="$(pursue_project_root "$cwd")"     || { pursue_emit_noop; return 0; }
+  goal_dir="$(pursue_goal_dir "$root")"    || { pursue_emit_noop; return 0; }
+
+  status="$(tr -d '[:space:]' < "$goal_dir/STATUS" 2>/dev/null || printf 'unknown')"
+  case "$status" in
+    active|paused|awaiting-confirmation) ;;
+    *) pursue_emit_noop; return 0 ;;
+  esac
+
+  pursue_heartbeat "$goal_dir" "$event"
+  pursue_emit_context "$event" "$(pursue_context_block "$root" "$goal_dir" "$status" "$event")"
+}
