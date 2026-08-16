@@ -258,7 +258,20 @@ pursue_detect_churn() {
 # that silently does nothing in that case would be the same mistake as
 # shipping a hook whose inputs nobody writes.
 pursue_detect_scope() {
-  local goal_dir="$1" root="$2" changed
+  local goal_dir="$1" root="$2" tool changed
+
+  # Only tools that can change the working tree are worth a git call.  This
+  # runs after every tool call in an active pursuit, and `-uall` walks the
+  # whole untracked tree — on a large repo it is the most expensive thing in
+  # the hot path, and Read/Grep/WebSearch cannot have changed anything.
+  # Bash is included because it is how most tree changes happen outside the
+  # edit tools.
+  tool="$(pursue_payload_field tool_name)"
+  case "$tool" in
+    Edit|Write|MultiEdit|NotebookEdit|Bash) ;;
+    *) return 0 ;;
+  esac
+
   git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || return 0
   # Exclude pursue's own state: a project that does not gitignore .agent/ would
   # otherwise count this hook's own bookkeeping as scope creep, and in the next
