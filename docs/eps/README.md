@@ -26,4 +26,4 @@ contained refactors.
 
 | #    | Title | Type | Status |
 |------|-------|------|--------|
-| 0001 | [Hook-Enforced Pursuit](./0001-hook-enforced-pursuit.md) | Standards | Draft |
+| 0001 | [Hook-Enforced Pursuit](./0001-hook-enforced-pursuit.md) | Standards | Accepted |

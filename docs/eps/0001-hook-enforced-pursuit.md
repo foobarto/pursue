@@ -2,7 +2,7 @@
 ep: 0001
 title: Hook-Enforced Pursuit
 author: Bartosz Ptaszynski <bartosz@foobarto.me>
-status: Draft
+status: Accepted
 type: Standards
 created: 2026-08-16
 see-also: ["stado EP-0062", "stado EP-0009", "stado EP-0051"]
@@ -13,6 +13,13 @@ history:
       Initial draft after reading the stado supervision corpus. D1 (hooks
       enforce, worker reviews) and D2 (Stop-block drives iteration) are
       operator-settled; the remaining decisions are drafted and unreviewed.
+  - date: 2026-08-16
+    status: Accepted
+    note: >
+      Accepted after operator review. D10 (verification commands declared in
+      the contract) was settled during that review and records a deliberate
+      divergence from EP-0062. Implementation has not started; this document
+      is append-only from here — a decision that changes goes in a new EP.
 ---
 
 > **Relationships:** modelled on [stado
