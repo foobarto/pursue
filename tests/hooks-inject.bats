@@ -75,6 +75,49 @@ payload() { printf '{"session_id":"s1","cwd":"%s","hook_event_name":"%s"}' "$1" 
   [ "$output" = "SessionStart" ]
 }
 
+# Linux caps a single exec argument at MAX_ARG_STRLEN (128KB) regardless of
+# the much larger ARG_MAX.  Passing the assembled context through jq's argv
+# therefore truncated to nothing above ~126KB: the hook fell back to {} while
+# the heartbeat had already been written, so a pursuit that injected nothing
+# looked exactly like a healthy one.
+@test "session-start injects a contract far larger than MAX_ARG_STRLEN" {
+  { printf '# Goal: big\n\n'
+    head -c 200000 /dev/zero | tr '\0' 'x'
+    printf '\nUNIQUE_CONTRACT_MARKER\n'
+  } > "$GOAL_DIR/goal.md"
+
+  run bash -c "printf '%s' '$(payload "$PROJ" SessionStart)' | '$REPO_ROOT/hooks/session-start.sh'"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e . >/dev/null
+  echo "$output" | jq -e '.hookSpecificOutput.additionalContext | length > 200000'
+  echo "$output" | jq -r '.hookSpecificOutput.additionalContext' | grep -q UNIQUE_CONTRACT_MARKER
+
+  run jq -r '.kind' "$GOAL_DIR/triggers.jsonl"
+  [ "$output" = "heartbeat" ]
+}
+
+# The heartbeat must describe what actually happened.  A jq that refuses the
+# emit stands in for any reason emission can fail; the run must still emit
+# valid JSON, and must NOT leave a record claiming a healthy injection.
+@test "session-start records emit-failed rather than a heartbeat when emission fails" {
+  real_jq="$(command -v jq)"
+  mkdir -p "$TMP/stub"
+  cat > "$TMP/stub/jq" <<STUB
+#!/usr/bin/env bash
+for a in "\$@"; do [ "\$a" = "-Rs" ] && exit 1; done
+exec "$real_jq" "\$@"
+STUB
+  chmod +x "$TMP/stub/jq"
+
+  run bash -c "printf '%s' '$(payload "$PROJ" SessionStart)' | PATH='$TMP/stub:$PATH' '$REPO_ROOT/hooks/session-start.sh'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "{}" ]
+
+  [ -f "$GOAL_DIR/triggers.jsonl" ]
+  run jq -r '.kind' "$GOAL_DIR/triggers.jsonl"
+  [ "$output" = "emit-failed" ]
+}
+
 @test "session-start no-ops when no pursuit is active" {
   : > "$PROJ/.agent/goals/active"
   run bash -c "printf '%s' '$(payload "$PROJ" SessionStart)' | '$REPO_ROOT/hooks/session-start.sh'"

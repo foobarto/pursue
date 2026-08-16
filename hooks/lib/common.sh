@@ -111,17 +111,30 @@ pursue_emit_noop() { printf '{}\n'; }
 # Inject context into the model's next turn.  Deliberately emits no
 # `decision` and no `continue`: SessionStart/PreCompact are injection-only,
 # the gate is a separate hook.
+#
+# The context goes in on jq's *stdin*, not its argv.  Linux caps a single
+# exec argument at MAX_ARG_STRLEN (128KB) independently of the far larger
+# ARG_MAX, so `--arg c "$block"` made exec fail outright once goal.md and
+# the progress tail crossed ~126KB — injection stopped, silently.  A byte
+# stream has no such limit.  `-Rs` reads it verbatim, producing exactly the
+# string `--arg` used to.
 pursue_emit_context() {
-  jq -n --arg e "$1" --arg c "$2" \
-    '{hookSpecificOutput: {hookEventName: $e, additionalContext: $c}}'
+  printf '%s' "$2" | jq -Rs --arg e "$1" \
+    '{hookSpecificOutput: {hookEventName: $e, additionalContext: .}}'
 }
 
-# Record that a hook actually ran.  This is what makes "hooks silently not
-# running" detectable after the fact (EP-0001 Failure modes) — without it,
-# an unenforced pursuit looks exactly like an enforced quiet one.
+# Record that a hook actually ran, and what it managed to do.  This is what
+# makes "hooks silently not running" detectable after the fact (EP-0001
+# Failure modes) — without it, an unenforced pursuit looks exactly like an
+# enforced quiet one.
+#
+# $3 is the record kind, default "heartbeat" (ran and injected).  Callers
+# pass a different kind when the run did something else, so that a
+# heartbeat never asserts more than actually happened.
 pursue_heartbeat() {
-  printf '{"ts":"%s","event":"%s","kind":"heartbeat"}\n' \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" >> "$1/triggers.jsonl" 2>/dev/null || true
+  printf '{"ts":"%s","event":"%s","kind":"%s"}\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$2" "${3:-heartbeat}" \
+    >> "$1/triggers.jsonl" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -182,7 +195,7 @@ pursue_context_block() {
 # Shared entrypoint body for the injection hooks.  Both SessionStart and
 # PreCompact do exactly this; only the event name differs.
 pursue_inject_main() {
-  local event="$1" cwd root goal_dir status
+  local event="$1" cwd root goal_dir status result
 
   pursue_read_payload
   pursue_have_jq || { pursue_emit_noop; return 0; }
@@ -199,6 +212,20 @@ pursue_inject_main() {
     *) pursue_emit_noop; return 0 ;;
   esac
 
-  pursue_heartbeat "$goal_dir" "$event"
-  pursue_emit_context "$event" "$(pursue_context_block "$root" "$goal_dir" "$status" "$event")"
+  # Emit first, record second, and record which of the two happened.  The
+  # heartbeat is the only evidence that enforcement is live; writing it
+  # before the emit meant a failed injection still logged a healthy-looking
+  # run, which is exactly the "unenforced is indistinguishable from
+  # enforced" failure the heartbeat exists to prevent.  Build the result in
+  # a variable so a partial write from a failing jq never reaches stdout.
+  if result="$(pursue_emit_context "$event" \
+                 "$(pursue_context_block "$root" "$goal_dir" "$status" "$event")")" \
+     && [[ -n "$result" ]]; then
+    printf '%s\n' "$result"
+    pursue_heartbeat "$goal_dir" "$event" heartbeat
+  else
+    pursue_emit_noop
+    pursue_heartbeat "$goal_dir" "$event" emit-failed
+  fi
+  return 0
 }
