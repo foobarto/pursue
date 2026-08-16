@@ -105,14 +105,24 @@ pursue_is_uint() { [[ "${1-}" =~ ^[0-9]+$ ]]; }
 
 # How long to wait for the state lock before giving up on this call.
 #
-# One second, not five.  pursue_detect_locked below states the asymmetry — a
+# Two seconds, not five.  pursue_detect_locked below states the asymmetry — a
 # missed detection costs one signal out of many, a blocked hook costs the
 # operator a wedged tool call — and then five seconds contradicted it, on a
 # hook that runs after *every* tool call.  Measured against a held lock, the
-# hook stalled for 5.02s.  One second still absorbs the contention this lock
-# actually sees (a handful of parallel hooks each holding it for tens of
-# milliseconds) without ever being the thing the operator notices.
-PURSUE_DETECT_LOCK_WAIT="${PURSUE_DETECT_LOCK_WAIT:-1}"
+# hook stalled for 5.05s.
+#
+# Not one second, though, which is where this was first set: the timeout has
+# to clear the queue this lock exists to form.  The ten-way parallel batch the
+# comment below describes takes ~1.05s to drain, because each hook holds the
+# lock for ~100ms of jq and git.  At a 1s wait the last hook in that queue
+# gives up and its count is lost — measured, the parallel test lost an update
+# in 2 runs out of 20.  Two seconds is roughly twice the measured drain and
+# lost none in 40, while still more than halving the worst-case stall.
+#
+# So this number is bounded on both sides, and neither bound is cosmetic:
+# below ~1.2s it drops the updates the lock was added for, above that it is
+# only ever paid when a holder is genuinely wedged.
+PURSUE_DETECT_LOCK_WAIT="${PURSUE_DETECT_LOCK_WAIT:-2}"
 
 pursue_detect_state_path() { printf '%s/detect-state.json\n' "$1"; }
 pursue_detect_lock_path()  { printf '%s/detect-state.lock\n' "$1"; }
@@ -165,7 +175,7 @@ pursue_detect_locked() {
   # handing an unvalidated operand to arithmetic, and just as invisible.
   # Fall back to the default rather than trusting it.
   wait="$PURSUE_DETECT_LOCK_WAIT"
-  pursue_is_uint "$wait" || wait=1
+  pursue_is_uint "$wait" || wait=2
   (
     flock -w "$wait" 9 2>/dev/null || exit 0
     "$@"
