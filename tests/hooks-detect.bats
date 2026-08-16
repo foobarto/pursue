@@ -571,3 +571,18 @@ pt_payload() {
   run jq -r '.errors | to_entries[0].value' "$GOAL_DIR/detect-state.json"
   [ "$output" = "10" ]
 }
+
+# ---------------------------------------------------------------------------
+# Subagent isolation
+# ---------------------------------------------------------------------------
+
+@test "post-tool-use ignores tool calls made inside a subagent" {
+  payload="$(jq -cn --arg c "$PROJ" '{session_id:"s1", cwd:$c, hook_event_name:"PostToolUse",
+    agent_id:"agt_reviewer_1", agent_type:"Explore", tool_name:"Read",
+    tool_input:{file_path:"/nope"}, tool_response:"Error: file not found"}')"
+  run bash -c "printf '%s' '$payload' | '$REPO_ROOT/hooks/post-tool-use.sh'"
+  [ "$status" -eq 0 ]
+  [ "$output" = "{}" ]
+  [ ! -f "$GOAL_DIR/detect-state.json" ]
+  [ ! -f "$GOAL_DIR/triggers.jsonl" ]
+}

@@ -54,6 +54,15 @@ pursue_detect_main() {
   # accumulating detector history the operator never asked for.
   [[ "$status" == "active" ]] || return 0
 
+  # PostToolUse also fires for tool calls made *inside* a subagent, and the
+  # payload carries agent_id when it does.  Those calls are not the worker's
+  # work: a read-only reviewer's own failed Reads would land in the worker's
+  # counters and could fire triggers about the review rather than the work.
+  # Same self-reference class as excluding .agent/ from the scope count, and
+  # it gets worse in the next slice, where reviewers run constantly.  So the
+  # observation layer observes exactly one actor.
+  [[ -z "$(pursue_payload_field agent_id)" ]] || return 0
+
   pursue_detect_locked "$goal_dir" pursue_detect_cycle "$goal_dir" "$root"
   return 0
 }
