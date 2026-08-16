@@ -17,6 +17,9 @@
 #   ./install.sh --skill-dir PATH   # also install into an arbitrary dir
 #                                   # (e.g. a project-local .claude/skills/)
 #   ./install.sh --force            # overwrite pre-existing non-symlink destinations
+#   ./install.sh --hooks            # also register the lifecycle hooks that
+#                                   # enforce pursuits (Claude Code, Codex)
+#   ./install.sh --no-hooks         # remove previously registered hooks
 #   ./install.sh --version          # print repo commit/tag, exit
 #
 # Exit codes:
@@ -111,6 +114,8 @@ do_list=0
 do_version=0
 use_copy=0
 force=0
+do_hooks=0
+undo_hooks=0
 target_cli=""
 declare -a skill_dirs=()
 
@@ -120,6 +125,8 @@ while [[ $# -gt 0 ]]; do
     --list)     do_list=1; shift ;;
     --copy)     use_copy=1; shift ;;
     --force)    force=1; shift ;;
+    --hooks)    do_hooks=1; shift ;;
+    --no-hooks) undo_hooks=1; shift ;;
     --version)  do_version=1; shift ;;
     --cli)      target_cli="${2:-}"; shift 2 ;;
     --skill-dir)
@@ -435,6 +442,91 @@ install_skill_dir() {
 }
 
 # ---------------------------------------------------------------------------
+# Lifecycle hooks (EP-0001)
+#
+# Claude Code and Codex accept the same hook scripts; only the config file
+# differs.  Both are keyed on the absolute script path, which is also how we
+# recognise our own entries on re-install and on --no-hooks.  Nothing else in
+# either config is touched.
+# ---------------------------------------------------------------------------
+
+# Emit "<Event> <absolute-script-path>" per registered hook.
+pursue_hook_entries() {
+  printf '%s %s\n' SessionStart "$repo_root/hooks/session-start.sh"
+  printf '%s %s\n' PreCompact  "$repo_root/hooks/pre-compact.sh"
+}
+
+require_jq_for_hooks() {
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "error: --hooks requires jq (the hooks parse JSON payloads)" >&2
+    echo "       install jq, or re-run without --hooks" >&2
+    exit 3
+  fi
+}
+
+# Merge our entries into ~/.claude/settings.json, preserving every other key
+# and every foreign hook.
+install_hooks_claude() {
+  local settings="${CLI_PARENT[claude-code]}/settings.json"
+  local event script tmp
+
+  if (( dry_run )); then
+    while read -r event script; do
+      echo "plan: register $event -> $script in $settings"
+    done < <(pursue_hook_entries)
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$settings")" || { echo "error: mkdir $(dirname "$settings")" >&2; exit 3; }
+  [[ -f "$settings" ]] || echo '{}' > "$settings"
+
+  while read -r event script; do
+    tmp="$(mktemp)"
+    jq --arg e "$event" --arg c "$script" '
+      .hooks //= {}
+      | .hooks[$e] //= []
+      # Drop any previous registration of this exact script, then append once.
+      | .hooks[$e] = (
+          [ .hooks[$e][]
+            | .hooks = [ .hooks[]? | select(.command != $c) ]
+            | select((.hooks | length) > 0)
+          ]
+          + [ { hooks: [ { type: "command", command: $c, timeout: 10 } ] } ]
+        )
+    ' "$settings" > "$tmp" || { echo "error: failed to update $settings" >&2; rm -f "$tmp"; exit 3; }
+    mv "$tmp" "$settings"
+  done < <(pursue_hook_entries)
+
+  echo "done: claude-code hooks -> $settings"
+}
+
+# Remove only our entries from ~/.claude/settings.json.
+uninstall_hooks_claude() {
+  local settings="${CLI_PARENT[claude-code]}/settings.json"
+  local event script tmp
+  [[ -f "$settings" ]] || return 0
+
+  if (( dry_run )); then
+    echo "plan: remove pursue hooks from $settings"
+    return 0
+  fi
+
+  while read -r event script; do
+    tmp="$(mktemp)"
+    jq --arg e "$event" --arg c "$script" '
+      if (.hooks[$e]? | type) == "array" then
+        .hooks[$e] = [ .hooks[$e][]
+          | .hooks = [ .hooks[]? | select(.command != $c) ]
+          | select((.hooks | length) > 0) ]
+      else . end
+    ' "$settings" > "$tmp" || { rm -f "$tmp"; exit 3; }
+    mv "$tmp" "$settings"
+  done < <(pursue_hook_entries)
+
+  echo "done: removed claude-code hooks from $settings"
+}
+
+# ---------------------------------------------------------------------------
 # Install
 # ---------------------------------------------------------------------------
 for cli in "${detected_clis[@]}"; do
@@ -448,6 +540,24 @@ done
 for extra in "${skill_dirs[@]}"; do
   install_skill_dir "$extra"
 done
+
+if (( do_hooks )); then
+  require_jq_for_hooks
+  for cli in "${detected_clis[@]}"; do
+    case "$cli" in
+      claude-code) install_hooks_claude ;;
+    esac
+  done
+fi
+
+if (( undo_hooks )); then
+  require_jq_for_hooks
+  for cli in "${detected_clis[@]}"; do
+    case "$cli" in
+      claude-code) uninstall_hooks_claude ;;
+    esac
+  done
+fi
 
 if (( dry_run )); then
   echo ""
