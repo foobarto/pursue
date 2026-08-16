@@ -309,3 +309,111 @@ real_fail_payload() {
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | wc -l"
   [ "$output" = "0" ]
 }
+
+# ---------------------------------------------------------------------------
+# Churn, scope, and regression detectors
+# ---------------------------------------------------------------------------
+
+init_repo() {
+  git -C "$PROJ" init -q 2>/dev/null
+  git -C "$PROJ" config user.email t@e.st
+  git -C "$PROJ" config user.name Test
+  printf 'one\n' > "$PROJ/a.txt"
+  git -C "$PROJ" add -A && git -C "$PROJ" commit -qm init
+}
+
+edit_payload() { printf '{"tool_name":"Edit","tool_input":{"file_path":"%s"},"tool_response":{"stdout":"ok"}}' "$1"; }
+
+@test "edit_revert_churn fires when a file returns to an earlier content" {
+  init_repo
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  PURSUE_PAYLOAD="$(edit_payload "$PROJ/a.txt")"
+  printf 'two\n' > "$PROJ/a.txt"; state="$(pursue_detect_churn "$GOAL_DIR" "$state" "$PROJ")"
+  printf 'three\n' > "$PROJ/a.txt"; state="$(pursue_detect_churn "$GOAL_DIR" "$state" "$PROJ")"
+  printf 'two\n' > "$PROJ/a.txt"; state="$(pursue_detect_churn "$GOAL_DIR" "$state" "$PROJ")"
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c edit_revert_churn"
+  [ "$output" = "1" ]
+}
+
+@test "edit_revert_churn stays quiet on forward-only edits" {
+  init_repo
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  PURSUE_PAYLOAD="$(edit_payload "$PROJ/a.txt")"
+  for v in two three four; do
+    printf '%s\n' "$v" > "$PROJ/a.txt"
+    state="$(pursue_detect_churn "$GOAL_DIR" "$state" "$PROJ")"
+  done
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c edit_revert_churn || true"
+  [ "$output" = "0" ]
+}
+
+@test "edit_revert_churn ignores non-edit tools" {
+  init_repo
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"stdout":"ok"}}'
+  run pursue_detect_churn "$GOAL_DIR" "$state" "$PROJ"
+  [ "$status" -eq 0 ]
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c edit_revert_churn || true"
+  [ "$output" = "0" ]
+}
+
+@test "scope_growth falls back to a file-count threshold with no plan.json" {
+  init_repo
+  for i in $(seq 1 6); do printf 'x\n' > "$PROJ/f$i.txt"; done
+  git -C "$PROJ" add -A
+  PURSUE_SCOPE_MAX_FILES=3 pursue_detect_scope "$GOAL_DIR" "$PROJ"
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c scope_growth"
+  [ "$output" = "1" ]
+}
+
+@test "scope_growth stays quiet under the threshold" {
+  init_repo
+  printf 'x\n' > "$PROJ/f1.txt"
+  git -C "$PROJ" add -A
+  PURSUE_SCOPE_MAX_FILES=10 pursue_detect_scope "$GOAL_DIR" "$PROJ"
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c scope_growth || true"
+  [ "$output" = "0" ]
+}
+
+@test "scope_growth is silent outside a git repo" {
+  run pursue_detect_scope "$GOAL_DIR" "$PROJ"
+  [ "$status" -eq 0 ]
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c scope_growth || true"
+  [ "$output" = "0" ]
+}
+
+@test "verification_regression fires when a passing command starts failing" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"go test ./..."},"tool_response":{"stdout":"ok"}}'
+  state="$(pursue_detect_verification "$GOAL_DIR" "$state")"
+  PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"go test ./..."},"tool_response":{"error":"FAIL"}}'
+  state="$(pursue_detect_verification "$GOAL_DIR" "$state")"
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c verification_regression"
+  [ "$output" = "1" ]
+}
+
+@test "verification_regression does not fire for a command that never passed" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"go test ./..."},"tool_response":{"error":"FAIL"}}'
+  state="$(pursue_detect_verification "$GOAL_DIR" "$state")"
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c verification_regression || true"
+  [ "$output" = "0" ]
+}
+
+@test "verification_regression ignores non-Bash tools" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  PURSUE_PAYLOAD='{"tool_name":"Read","tool_input":{"file_path":"/x"},"tool_response":{"stdout":"ok"}}'
+  run pursue_detect_verification "$GOAL_DIR" "$state"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.verified == {}'
+}
+
+@test "verification_regression fires with real-shape success then failure" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"go test ./..."},"tool_response":{"stdout":"ok","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false}}'
+  state="$(pursue_detect_verification "$GOAL_DIR" "$state")"
+  PURSUE_PAYLOAD='{"tool_name":"Bash","tool_input":{"command":"go test ./..."},"tool_response":"Error: Exit code 1\nFAIL github.com/x/y"}'
+  state="$(pursue_detect_verification "$GOAL_DIR" "$state")"
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' 2>/dev/null | grep -c verification_regression"
+  [ "$output" = "1" ]
+}

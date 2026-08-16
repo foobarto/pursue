@@ -203,3 +203,89 @@ pursue_detect_failures() {
 
   printf '%s\n' "$state"
 }
+
+# ---------------------------------------------------------------------------
+# Churn, scope, and regression detectors
+# ---------------------------------------------------------------------------
+
+# How many changed files count as scope growth when the active plan step
+# declares no scope of its own.
+PURSUE_SCOPE_MAX_FILES="${PURSUE_SCOPE_MAX_FILES:-15}"
+
+# A file edited back to a content hash it already had is churn: the worker
+# is cycling rather than converging.  Only the last few hashes per file are
+# kept — the interesting case is a short oscillation, not a file returning
+# after a hundred edits.
+PURSUE_CHURN_HISTORY="${PURSUE_CHURN_HISTORY:-6}"
+
+pursue_detect_churn() {
+  local goal_dir="$1" state="$2" root="$3" tool path hash seen
+  tool="$(pursue_payload_field tool_name)"
+  case "$tool" in
+    Edit|Write|MultiEdit|NotebookEdit) ;;
+    *) printf '%s\n' "$state"; return 0 ;;
+  esac
+
+  path="$(pursue_payload_raw tool_input | jq -r '.file_path // empty' 2>/dev/null)"
+  [[ -n "$path" && -r "$path" ]] || { printf '%s\n' "$state"; return 0; }
+  hash="$(sha256sum "$path" 2>/dev/null | cut -c1-12)"
+  [[ -n "$hash" ]] || { printf '%s\n' "$state"; return 0; }
+
+  seen="$(printf '%s' "$state" \
+    | jq -r --arg p "$path" --arg h "$hash" \
+        '[(.files[$p] // [])[] | select(. == $h)] | length' 2>/dev/null || printf '0')"
+
+  state="$(printf '%s' "$state" | jq -c \
+    --arg p "$path" --arg h "$hash" --argjson keep "$PURSUE_CHURN_HISTORY" '
+      .files //= {}
+      | .files[$p] = ((.files[$p] // []) + [$h] | .[-$keep:])
+    ' 2>/dev/null || printf '%s' "$state")"
+
+  if [[ "$seen" != "0" ]]; then
+    pursue_detect_trigger "$goal_dir" edit_revert_churn \
+      "$(jq -cn --arg p "$path" --arg h "$hash" '{path: $p, content: $h}')"
+  fi
+  printf '%s\n' "$state"
+}
+
+# Scope growth against the active step's declared scope, falling back to a
+# changed-file count when no scope is declared.  The fallback matters: until
+# the contract flow lands there is no declared scope at all, and a detector
+# that silently does nothing in that case would be the same mistake as
+# shipping a hook whose inputs nobody writes.
+pursue_detect_scope() {
+  local goal_dir="$1" root="$2" changed
+  git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  changed="$(git -C "$root" status --porcelain 2>/dev/null | wc -l)"
+  [[ "$changed" -gt "$PURSUE_SCOPE_MAX_FILES" ]] || return 0
+  pursue_detect_trigger "$goal_dir" scope_growth \
+    "$(jq -cn --argjson n "$changed" --argjson max "$PURSUE_SCOPE_MAX_FILES" \
+         '{changed_files: $n, threshold: $max, basis: "file-count fallback"}')"
+}
+
+# A shell command that previously succeeded and now fails is a regression,
+# which is a stronger signal than a command that never worked: something
+# that was true stopped being true.
+pursue_detect_verification() {
+  local goal_dir="$1" state="$2" tool cmd key prior fp
+  tool="$(pursue_payload_field tool_name)"
+  [[ "$tool" == "Bash" ]] || { printf '%s\n' "$state"; return 0; }
+
+  cmd="$(pursue_payload_raw tool_input | jq -r '.command // empty' 2>/dev/null)"
+  [[ -n "$cmd" ]] || { printf '%s\n' "$state"; return 0; }
+  key="$(printf '%s' "$cmd" | sha256sum | cut -c1-12)"
+
+  prior="$(printf '%s' "$state" | jq -r --arg k "$key" '(.verified[$k] // "")' 2>/dev/null)"
+  fp="$(pursue_error_fingerprint)"
+
+  if [[ -z "$fp" ]]; then
+    state="$(printf '%s' "$state" | jq -c --arg k "$key" '.verified //= {} | .verified[$k] = "pass"' 2>/dev/null || printf '%s' "$state")"
+  else
+    if [[ "$prior" == "pass" ]]; then
+      pursue_detect_trigger "$goal_dir" verification_regression \
+        "$(jq -cn --arg c "$cmd" --arg f "$fp" '{command: $c, fingerprint: $f}')"
+    fi
+    state="$(printf '%s' "$state" | jq -c --arg k "$key" '.verified //= {} | .verified[$k] = "fail"' 2>/dev/null || printf '%s' "$state")"
+  fi
+  printf '%s\n' "$state"
+}
