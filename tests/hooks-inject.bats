@@ -111,3 +111,27 @@ payload() { printf '{"session_id":"s1","cwd":"%s","hook_event_name":"%s"}' "$1" 
   echo "$output" | jq -e 'has("decision") | not'
   echo "$output" | jq -e 'has("continue") | not'
 }
+
+@test "pre-compact injects the contract" {
+  run bash -c "printf '%s' '$(payload "$PROJ" PreCompact)' | '$REPO_ROOT/hooks/pre-compact.sh'"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.hookSpecificOutput.hookEventName == "PreCompact"'
+  echo "$output" | jq -r '.hookSpecificOutput.additionalContext' | grep -q UNIQUE_CONTRACT_MARKER
+}
+
+@test "pre-compact writes a heartbeat naming its own event" {
+  bash -c "printf '%s' '$(payload "$PROJ" PreCompact)' | '$REPO_ROOT/hooks/pre-compact.sh'" >/dev/null
+  run jq -r '.event' "$GOAL_DIR/triggers.jsonl"
+  [ "$output" = "PreCompact" ]
+}
+
+@test "pre-compact no-ops outside any pursuit" {
+  run bash -c "printf '%s' '$(payload "$TMP" PreCompact)' | '$REPO_ROOT/hooks/pre-compact.sh'"
+  [ "$output" = "{}" ]
+}
+
+@test "pre-compact never emits decision or continue" {
+  run bash -c "printf '%s' '$(payload "$PROJ" PreCompact)' | '$REPO_ROOT/hooks/pre-compact.sh'"
+  echo "$output" | jq -e 'has("decision") | not'
+  echo "$output" | jq -e 'has("continue") | not'
+}
