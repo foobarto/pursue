@@ -1,12 +1,12 @@
 ---
 name: pursue
-description: Pursue a stated goal autonomously across iterations until acceptance criteria are met or the operator stops. Use when the operator invokes `/pursue <description>` to start a long-running pursuit, or `/pursue status|pause|resume|stop|continue` to control an active pursuit. Persists state under `.claude/goals/` so multi-day work survives session resets. Distinct from the built-in `/goal` (a lightweight stop-condition gate) — this is the heavyweight structured-pursuit framework with acceptance criteria, an iteration loop, and per-project state files.
+description: Pursue a stated goal autonomously across iterations until acceptance criteria are met or the operator stops. Use when the operator invokes `/pursue <description>` to start a long-running pursuit, or `/pursue status|pause|resume|stop|continue` to control an active pursuit. Persists state under `.agent/goals/` so multi-day work survives session resets. Distinct from the built-in `/goal` (a lightweight stop-condition gate) — this is the heavyweight structured-pursuit framework with acceptance criteria, an iteration loop, and per-project state files.
 argument-hint: "<goal description> | status | pause | resume | stop | continue"
 ---
 
 # Pursue
 
-Take a goal from the operator and pursue it relentlessly until the acceptance criteria are met or the operator stops. State persists under `.claude/goals/` so the pursuit survives session resets and context compaction.
+Take a goal from the operator and pursue it relentlessly until the acceptance criteria are met or the operator stops. State persists under `.agent/goals/` so the pursuit survives session resets and context compaction.
 
 > **Not the built-in `/goal`.** Claude Code ships a built-in `/goal <condition>` that sets a lightweight stop-condition: after each turn the harness checks whether the condition is met and auto-continues until it is. That primitive has no state files, no acceptance criteria, no iteration log. This skill (`/pursue`) is the heavyweight version: structured `goal.md` / `progress.md` / `blockers.md`, a self-paced `ScheduleWakeup` loop, and explicit pause/resume/stop lifecycle. Use the built-in for "keep going until X is true" within a session; use `/pursue` for multi-day work that must survive resets.
 
@@ -25,10 +25,10 @@ Treat `/pursue` as the workflow itself — do NOT also invoke `brainstorming`, `
 
 ## State layout
 
-Per-project, under the project's `.claude/`:
+Per-project, under the project's `.agent/`:
 
 ```
-.claude/goals/
+.agent/goals/
   active                     # plain text: slug of the active goal, or empty file
   <slug>/
     goal.md                  # statement, acceptance criteria, non-goals, constraints
@@ -41,21 +41,23 @@ Per-project, under the project's `.claude/`:
 
 Slug = `YYYY-MM-DD-<first-40-chars-lowercased-non-alnum-to-dash>`.
 
-Only one active pursuit per project. Enforce via `.claude/goals/active`. (The state directory keeps the name `.claude/goals/` — the built-in `/goal` is transcript-based and never touches it, so there is no collision.)
+Only one active pursuit per project. Enforce via `.agent/goals/active`. (The state directory is `.agent/goals/`, not `.claude/goals/`: pursue targets Codex, Gemini CLI, Copilot CLI and Cursor as well as Claude Code, so pursuit state must be harness-neutral, and `.claude/` is reserved for Claude Code's own harness files. The built-in `/goal` is transcript-based and never touches either path, so there is no collision.)
+
+**Migrating an existing pursuit.** On any `/pursue` invocation, if `.claude/goals/active` exists and `.agent/goals/` does not, move the whole directory — `mv .claude/goals .agent/goals` (creating `.agent/` first) — before doing anything else, and append an entry to the active pursuit's `progress.md` recording the move. Never operate on `.claude/goals/` after that: the hooks only read `.agent/goals/`, so a pursuit left behind at the old path runs unenforced.
 
 ## Approach
 
 ### `/pursue <description>` — start a new pursuit
 
-1. **Check active pursuit.** If `.claude/goals/active` is non-empty, ask the operator: pause/stop the existing one, or queue this for later? Don't silently overwrite.
-2. **Audit gitignore.** Per the operator's CLAUDE.md, ensure project root `.gitignore` lists `.claude/.gitignore` and `.claude/.gitignore` covers any sensitive patterns. Default: track `goal.md`, `progress.md`, `blockers.md`, `STATUS`, `active` — they're history worth preserving. Extend exclusions if the operator asks.
+1. **Check active pursuit.** If `.agent/goals/active` is non-empty, ask the operator: pause/stop the existing one, or queue this for later? Don't silently overwrite.
+2. **Audit gitignore.** Per the operator's CLAUDE.md, ensure project root `.gitignore` lists `.agent/.gitignore` and `.agent/.gitignore` covers any sensitive patterns. Default: track `goal.md`, `progress.md`, `blockers.md`, `STATUS`, `active` — they're history worth preserving. Extend exclusions if the operator asks.
 3. **Extract acceptance criteria.** Convert the description into:
    - **Statement** — one paragraph: what success looks like, why it matters.
    - **Acceptance criteria** — 3 to 7 concrete, verifiable checks. Each must name the *evidence* required (a passing test, a published artifact, a confirmed metric, an operator sign-off). "Improves performance" is not a criterion; "p95 request latency under 200ms measured over a 1h window" is.
    - **Non-goals** — explicitly out of scope.
    - **Constraints** — deadlines, budget, off-limits paths, dependencies.
    If the description is too vague to extract verifiable criteria, ask **one** clarifying question (per CLAUDE.md: one good question, not a list), then proceed.
-4. **Write `goal.md`** using the template below. Set `STATUS=active`. Write the slug to `.claude/goals/active`. Append a journal entry referencing the new goal.
+4. **Write `goal.md`** using the template below. Set `STATUS=active`. Write the slug to `.agent/goals/active`. Append a journal entry referencing the new goal.
 5. **Kick off the loop.** Invoke `/loop /pursue continue` (no interval — self-paced via `ScheduleWakeup`). The first iteration starts immediately.
 
 ### `/pursue continue` — one iteration
@@ -74,7 +76,7 @@ This is the loop body. Each call is a complete unit of work, recorded with evide
 8. **Re-evaluate acceptance criteria.** For each criterion, classify as `met | not-met | uncertain` with a one-line evidence reference. If all are `met`:
    - Set `STATUS=awaiting-confirmation`.
    - Write a final summary block at the top of `progress.md`: each criterion + its evidence path.
-   - Surface to the operator: *"Pursuit `<slug>` looks complete — see `.claude/goals/<slug>/progress.md`. Confirm to mark done, or tell me what's missing."*
+   - Surface to the operator: *"Pursuit `<slug>` looks complete — see `.agent/goals/<slug>/progress.md`. Confirm to mark done, or tell me what's missing."*
    - Exit without rescheduling. Operator confirmation flips `STATUS=done`.
 9. **Otherwise, schedule the next iteration** via `ScheduleWakeup`:
    - **Local action ready to run:** `delaySeconds: 60–270` (cache stays warm).
@@ -109,8 +111,8 @@ Confirm with the operator first: *"This will end pursuit `<slug>` permanently an
 
 - Set `STATUS=stopped`.
 - Append a final entry to `progress.md` with the reason for stopping.
-- Clear `.claude/goals/active`.
-- `mv .claude/goals/<slug> .claude/goals/_archive/<slug>`.
+- Clear `.agent/goals/active`.
+- `mv .agent/goals/<slug> .agent/goals/_archive/<slug>`.
 
 ## Honesty discipline
 
@@ -128,7 +130,7 @@ This is the highest-cost area to get wrong. The autonomous loop runs without ope
 - **Same-approach loops** — iteration N+1 is a tweaked retry of N which already hit a wall. Switch perspective, switch level, or ask one question. Don't retry the same approach with different settings.
 - **Cache thrash on wakeup** — `delaySeconds: 300` is the worst-of-both option. Stay ≤270 or commit to ≥1200.
 - **Cross-pursuit contamination** — only one active pursuit per project. Don't try to run two simultaneously.
-- **Sensitive output in tracked files** — `progress.md` is tracked. Credentials, internal stakeholder names, third-party data go in `.claude/notes/brainstorms/` (gitignored) and `progress.md` references the path. Re-audit `.claude/.gitignore` whenever a new sensitive pattern appears.
+- **Sensitive output in tracked files** — `progress.md` is tracked. Credentials, internal stakeholder names, third-party data go in `.claude/notes/brainstorms/` (gitignored) and `progress.md` references the path. Re-audit `.agent/.gitignore` whenever a new sensitive pattern appears.
 - **Skipping pre-flight stop scan** — the loop is autonomous; missed stop signals mean wasted work and operator frustration. Pre-flight scan is non-negotiable.
 - **Auto-approving destructive actions** — never. The operator's CLAUDE.md requires per-action confirmation for destructive moves. The loop pauses (sets `STATUS=paused`) when the next action would be destructive and asks the operator.
 

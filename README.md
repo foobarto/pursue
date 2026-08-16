@@ -2,7 +2,7 @@
 
 A portable agent skill that pursues a stated goal **autonomously across
 iterations** until acceptance criteria are met or you stop it. State
-persists on disk under `.claude/goals/`, so a pursuit survives session
+persists on disk under `.agent/goals/`, so a pursuit survives session
 resets and context compaction — multi-day work picks up where it left off.
 
 You drive it with a slash command:
@@ -56,15 +56,35 @@ your system (Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Cursor):
 
 ### Hooks (Claude Code and Codex)
 
-Without hooks, `/pursue` is instructions the agent may or may not follow.
-With them, the harness enforces the loop: the contract is re-injected into
-every new session, and (from the next release) a pursuit cannot end while
-acceptance criteria are unmet.
+Without hooks, `/pursue` is instructions the agent may or may not follow —
+evaluated by the same context that is under pressure to skip them. Hooks run
+in a separate process, outside the model's context, whether or not the model
+cooperates. They are the only part of pursue that is enforcement rather than
+prose.
 
 ```sh
 ./install.sh --hooks      # register the lifecycle hooks
 ./install.sh --no-hooks   # remove them again
 ```
+
+**What this release's hooks do:** contract re-injection, and nothing else.
+`SessionStart` and `PreCompact` re-inject the active pursuit's contract,
+anchor, active plan step, open blockers, and recent progress — so a pursuit
+survives a session reset or a compaction without depending on the agent
+remembering to re-read its own state. Every hook run also writes a heartbeat
+to `triggers.jsonl`, which is what makes "hooks silently not running"
+detectable after the fact.
+
+**What they do not yet do:** gate. There is no `Stop` hook and there are no
+detectors in this release, so nothing prevents a pursuit from ending with
+acceptance criteria unmet — that is still the agent's own discipline. The
+completion and continuation gate is specified in
+[EP-0001](./docs/eps/0001-hook-enforced-pursuit.md) and arrives in a later
+release.
+
+The hooks read pursuit state from `.agent/goals/` (the layout below). A
+pursuit whose state lives anywhere else is invisible to them, and they will
+stay silent rather than fire.
 
 Hooks are opt-in — a plain `./install.sh` never touches your harness config.
 Registration merges into your existing config and leaves unrelated hooks
@@ -122,11 +142,11 @@ long-running autonomous agents. Specifically it expects, where available:
 - an **off-limits paths** policy and a **per-action confirmation rule for
   destructive operations** — the loop pauses and asks rather than
   auto-approving anything destructive;
-- a **`.claude/.gitignore`** it audits so sensitive output never lands in
+- a **`.agent/.gitignore`** it audits so sensitive output never lands in
   tracked state files.
 
 If your project has no such `CLAUDE.md`, those touch-points degrade to
-no-ops: the skill still self-manages `.claude/goals/`, records evidence,
+no-ops: the skill still self-manages `.agent/goals/`, records evidence,
 and respects stop signals — you just don't get the journal/decisions
 cross-linking. A reference setup for this style of agent is the kind of
 general-agent `CLAUDE.md` that defines journal, decisions, off-limits, and
@@ -149,10 +169,11 @@ self-critique discipline.
 
 ### State layout
 
-Per project, under `.claude/`:
+Per project, under `.agent/` — harness-neutral, because pursue runs under
+five CLIs and `.claude/` belongs to one of them:
 
 ```
-.claude/goals/
+.agent/goals/
   active              # slug of the active goal (one pursuit per project)
   <slug>/
     goal.md           # statement, acceptance criteria, non-goals, constraints
