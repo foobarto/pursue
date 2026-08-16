@@ -124,8 +124,8 @@ msg_with() {
   [ "$output" = "{}" ]
   slug="$(pursue_anchor_slug "$anchor")"
   [ -f "$GOAL_DIR/verdicts/$slug.json" ]
-  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl'"
-  [ "$output" = "verdict-recorded" ]
+  run bash -c "jq -r 'select(.kind==\"verdict\") | .name' '$GOAL_DIR/triggers.jsonl'"
+  [ "$output" = "recorded" ]
 }
 
 @test "subagent-stop discards a malformed verdict and says so" {
@@ -136,8 +136,8 @@ msg_with() {
   [ ! -d "$GOAL_DIR/verdicts" ] || {
     run bash -c "ls '$GOAL_DIR/verdicts' | wc -l"; [ "$output" = "0" ]
   }
-  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl'"
-  [ "$output" = "verdict-rejected" ]
+  run bash -c "jq -r 'select(.kind==\"verdict\") | .name' '$GOAL_DIR/triggers.jsonl'"
+  [ "$output" = "rejected" ]
 }
 
 @test "subagent-stop ignores a subagent that emitted no verdict block" {
@@ -259,6 +259,23 @@ msg_with() {
   [ "$output" = "stop" ]
   run jq -r '.agent_id' "$GOAL_DIR/verdicts/$slug.json"
   [ "$output" = "agt_watchdog" ]
-  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' | tr '\n' ' '"
-  [ "$output" = "verdict-recorded verdict-rejected " ]
+  run bash -c "jq -r 'select(.kind==\"verdict\") | .name' '$GOAL_DIR/triggers.jsonl' | tr '\n' ' '"
+  [ "$output" = "recorded rejected " ]
+}
+
+# ---------------------------------------------------------------------------
+# Verdict records are not triggers
+# ---------------------------------------------------------------------------
+
+@test "subagent-stop writes no kind:trigger line on either path" {
+  good="$(jq -cn --arg c "$PROJ" --arg m "$(msg_with '{"verdict":"stop","reason":"unsafe"}')" \
+    '{session_id:"s1", cwd:$c, hook_event_name:"SubagentStop", last_assistant_message:$m}')"
+  bad="$(jq -cn --arg c "$PROJ" --arg m "$(msg_with '{"verdict":"maybe","reason":"x"}')" \
+    '{session_id:"s1", cwd:$c, hook_event_name:"SubagentStop", last_assistant_message:$m}')"
+  printf '%s' "$good" | "$REPO_ROOT/hooks/subagent-stop.sh" >/dev/null
+  printf '%s' "$bad"  | "$REPO_ROOT/hooks/subagent-stop.sh" >/dev/null
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' | wc -l"
+  [ "$output" = "0" ]
+  run bash -c "jq -r 'select(.kind==\"verdict\") | .name' '$GOAL_DIR/triggers.jsonl' | tr '\n' ' '"
+  [ "$output" = "recorded rejected " ]
 }

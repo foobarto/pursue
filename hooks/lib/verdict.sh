@@ -114,6 +114,25 @@ pursue_verdict_write() {
   return 0
 }
 
+# Append one verdict record to triggers.jsonl.
+#
+# Deliberately NOT pursue_detect_trigger.  A trigger is "something happened
+# that needs a review"; a verdict record is "a review happened".  Writing
+# these as kind:"trigger" made the two indistinguishable, and the next
+# slice's gate blocks while an unconsumed trigger has no verdict at the
+# current anchor — so recording a verdict would demand a review, which would
+# record a verdict, forever.  EP-0001's file layout specifies kind:"verdict"
+# here, and that is what the gate was designed against.
+pursue_verdict_record() {
+  local detail line
+  detail="${3-}"
+  [[ -n "$detail" ]] || detail='{}'
+  line="$(jq -cn --arg n "$2" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson d "$detail" \
+            '{ts: $ts, kind: "verdict", name: $n, detail: $d}' 2>/dev/null)" || return 0
+  pursue_detect_append "$1" "$line"
+}
+
 # The three-way stale policy.  Discarding everything stale would make a slow
 # reviewer decoration; applying everything stale would let a judgement about
 # an old state control a new one.  So: an obsolete approval is worthless, an
