@@ -32,6 +32,12 @@ jobs:
         with:
           scandir: "."
           check_together: "yes"
+          # Pinned so a local run is a faithful preflight. The action itself
+          # is SHA-pinned, but it downloads the shellcheck binary at runtime,
+          # so an unpinned `stable` lets an upstream release fail CI with no
+          # change to this repo -- which is exactly what happened when 0.9.0
+          # passed locally and a newer build failed here on SC2329.
+          version: "v0.9.0"
         env:
           # Match the standard the branch holds itself to locally:
           # `shellcheck -x` at shellcheck's own default severity. Without -x

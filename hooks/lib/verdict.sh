@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Verdict decoding and staleness (EP-0001 §Verdicts and the stale-result
+# policy).
+#
+# A reviewer's judgement only means anything about the state it actually
+# looked at.  Everything here exists to keep that binding intact: the
+# verdict is written under the anchor it reviewed, and a verdict whose
+# anchor is not the current one is classified rather than trusted.
+#
+# Sourced after common.sh and detect.sh.  Same rules: no stray stdout,
+# fail open.
+
+# The fenced-block tag a reviewer must use.  It is the discriminator: an
+# ordinary subagent that happens to end with JSON is not a reviewer, and
+# must not be mistaken for one.
+PURSUE_VERDICT_TAG="${PURSUE_VERDICT_TAG:-pursue-verdict}"
+
+# Filename-safe form of an anchor.  Anchors contain ':' — legal in a Linux
+# filename but awkward everywhere else — so the on-disk name substitutes
+# '_'.  The full anchor is stored inside the file, which is what the
+# staleness comparison actually reads.
+pursue_anchor_slug() { printf '%s\n' "${1//:/_}"; }
+
+# Print the contents of the *last complete* tagged fenced block, or nothing.
+#
+# Last, not first: the next slice's reviewer brief contains an example
+# verdict block, and models echo their instructions routinely.  Taking the
+# first block meant a reviewer that quoted the example before giving its
+# real answer had the example recorded as its verdict — the worst possible
+# failure for this function, because the example is an approval.  The real
+# verdict is the one the reviewer arrived at, which is the last one.
+#
+# Complete, not merely opened: an unterminated block is not a candidate at
+# all, which is also what stops a truncated message from having its trailing
+# prose swallowed into a half-read verdict.
+pursue_verdict_extract() {
+  printf '%s' "$1" | awk -v tag="$PURSUE_VERDICT_TAG" '
+    $0 ~ "^[[:space:]]*```" tag "[[:space:]]*$" { inblock = 1; n = 0; next }
+    inblock && /^[[:space:]]*```[[:space:]]*$/ {
+      inblock = 0; complete = 1; kept = n
+      for (i = 1; i <= n; i++) block[i] = buf[i]
+      next
+    }
+    inblock { buf[++n] = $0; next }
+    END { if (complete) for (i = 1; i <= kept; i++) print block[i] }
+  ' 2>/dev/null || true
+}
+
+# Strict decode.  Returns non-zero for anything that is not a well-formed
+# verdict; callers discard rather than repair.  A garbled verdict that got
+# coerced into a valid-looking one would be a model's noise promoted to
+# consent.
+pursue_verdict_validate() {
+  # NOTE: the brief's original predicate was
+  #   ["continue","correct","pause","stop","approve"] | index(.verdict) != null
+  # which is a jq operator-precedence bug: inside `array | index(.verdict)`,
+  # `.verdict` is evaluated against the array being piped in (the input to
+  # index()), not the original object, so it always fails with "Cannot
+  # index array with string verdict" -- every call, valid or not. Rewritten
+  # with `.verdict | IN(...)` instead, which is semantically identical (same
+  # five-value membership check) but evaluates against the right input
+  # because the array literal here does not depend on `.` at all.
+  printf '%s' "$1" | jq -e '
+    type == "object"
+    and (.verdict | type) == "string"
+    and (.verdict | IN("continue","correct","pause","stop","approve"))
+    and (.reason | type) == "string"
+    and ((.reason | gsub("^\\s+|\\s+$"; "")) | length) > 0
+  ' >/dev/null 2>&1
+}
+
+# Store a validated verdict under the anchor it reviewed, with that anchor
+# and the reviewer's identity recorded inside it.
+#
+#   $4 (optional) — the reviewing subagent's agent_id.  The next slice needs
+#   it to check that the verifier is not the watchdog that raised the
+#   trigger; a verdict with no recorded author cannot satisfy that check.
+#
+# Returns 0 on success, 2 when refused, 1 on any other failure.
+#
+# REFUSAL: a `pause` or `stop` already recorded at this anchor is not
+# overwritable.  Last-write-wins made a verdict downgradable with no shell
+# and no filesystem access at all: the worker composes its own subagent
+# prompts, so it could dispatch a second "reviewer" instructed to emit
+# `continue` and overwrite an inconvenient `stop` — routing around the
+# PreToolUse denial the next slice adds, from inside the model's ordinary
+# capabilities.  The anchor is what makes refusing safe rather than sticky:
+# any real change to the tree, plan, or iteration moves the anchor, so a
+# stop only binds the exact state it was passed on.  Upgrades still work;
+# only the downgrade is refused.
+pursue_verdict_write() {
+  local goal_dir="$1" anchor="$2" json="$3" agent="${4-}" dir slug tmp existing
+  dir="$goal_dir/verdicts"
+  mkdir -p "$dir" 2>/dev/null || return 1
+  slug="$(pursue_anchor_slug "$anchor")"
+
+  if [[ -r "$dir/$slug.json" ]]; then
+    existing="$(jq -r '.verdict // empty' "$dir/$slug.json" 2>/dev/null || printf '')"
+    case "$existing" in
+      pause|stop) return 2 ;;
+    esac
+  fi
+
+  tmp="$(mktemp "$dir/$slug.json.XXXXXX" 2>/dev/null)" || return 1
+  if printf '%s' "$json" \
+       | jq -c --arg a "$anchor" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+           --arg ag "$agent" \
+           '. + {anchor: $a, recorded_at: $ts}
+              + (if $ag == "" then {} else {agent_id: $ag} end)' > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$dir/$slug.json" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  else
+    rm -f "$tmp"; return 1
+  fi
+  return 0
+}
+
+# Append one verdict record to triggers.jsonl.
+#
+# Deliberately NOT pursue_detect_trigger.  A trigger is "something happened
+# that needs a review"; a verdict record is "a review happened".  Writing
+# these as kind:"trigger" made the two indistinguishable, and the next
+# slice's gate blocks while an unconsumed trigger has no verdict at the
+# current anchor — so recording a verdict would demand a review, which would
+# record a verdict, forever.  EP-0001's file layout specifies kind:"verdict"
+# here, and that is what the gate was designed against.
+pursue_verdict_record() {
+  local detail line
+  detail="${3-}"
+  [[ -n "$detail" ]] || detail='{}'
+  line="$(jq -cn --arg n "$2" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson d "$detail" \
+            '{ts: $ts, kind: "verdict", name: $n, detail: $d}' 2>/dev/null)" || return 0
+  pursue_detect_append "$1" "$line"
+}
+
+# The three-way stale policy.  Discarding everything stale would make a slow
+# reviewer decoration; applying everything stale would let a judgement about
+# an old state control a new one.  So: an obsolete approval is worthless, an
+# obsolete correction may still be useful advice, and an obsolete stop is
+# serious enough to demand a fresh look rather than be dropped.
+pursue_verdict_classify() {
+  local json="$1" current="$2" anchor verdict
+  anchor="$(printf '%s' "$json" | jq -r '.anchor // empty' 2>/dev/null)"
+  verdict="$(printf '%s' "$json" | jq -r '.verdict // empty' 2>/dev/null)"
+  if [[ -n "$anchor" && "$anchor" == "$current" ]]; then
+    printf 'current\n'; return 0
+  fi
+  case "$verdict" in
+    continue|approve) printf 'stale-discard\n' ;;
+    correct)          printf 'stale-advisory\n' ;;
+    pause|stop)       printf 'stale-confirm\n' ;;
+    *)                printf 'stale-discard\n' ;;
+  esac
+}

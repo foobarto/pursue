@@ -405,3 +405,71 @@ JSON
   python3 -c "import tomllib,sys; tomllib.load(open(sys.argv[1],'rb'))" \
     "$FAKE_HOME/.codex/config.toml"
 }
+
+@test "--hooks registers PostToolUse for both harnesses" {
+  mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/.codex"
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  jq -e '.hooks.PostToolUse[0].hooks[0].command | contains("post-tool-use.sh")' "$SETTINGS"
+  jq -e '.hooks.PostToolUse[0].hooks[0].command | contains("post-tool-use.sh")' "$FAKE_HOME/.codex/hooks.json"
+}
+
+@test "--no-hooks removes PostToolUse too" {
+  mkdir -p "$FAKE_HOME/.claude"
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  "$REPO_ROOT/install.sh" --no-hooks >/dev/null
+  run jq '[.hooks.PostToolUse[]?.hooks[]? | select(.command | contains("post-tool-use.sh"))] | length' "$SETTINGS"
+  [ "$output" = "0" ]
+}
+
+@test "--hooks registers SubagentStop for both harnesses" {
+  mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/.codex"
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  jq -e '.hooks.SubagentStop[0].hooks[0].command | contains("subagent-stop.sh")' "$SETTINGS"
+  jq -e '.hooks.SubagentStop[0].hooks[0].command | contains("subagent-stop.sh")' "$FAKE_HOME/.codex/hooks.json"
+}
+
+# ---------------------------------------------------------------------------
+# Hook dependencies
+#
+# The hooks are required to stay silent, so install time is the only moment
+# the operator can be told that flock is missing and detection will be racy.
+# ---------------------------------------------------------------------------
+
+# A PATH containing every command except one; see the same helper in
+# tests/hooks-detect.bats.  Hiding a binary from an exec'd script means
+# rebuilding the search path — there is no per-command unset that survives.
+path_without() {
+  local omit="$1" dest="$FAKE_HOME/nobin" d f b
+  mkdir -p "$dest"
+  local IFS=:
+  for d in $PATH; do
+    [ -d "$d" ] || continue
+    for f in "$d"/*; do
+      b="${f##*/}"
+      [ "$b" = "$omit" ] && continue
+      [ -e "$dest/$b" ] && continue
+      ln -s "$f" "$dest/$b" 2>/dev/null || true
+    done
+  done
+  printf '%s\n' "$dest"
+}
+
+@test "--hooks reports a missing flock and still installs" {
+  mkdir -p "$FAKE_HOME/.claude"
+  nobin="$(path_without flock)"
+  # Guards against a vacuous pass if the mirror ever fails to exclude it.
+  run bash -c "export PATH='$nobin'; command -v flock || echo masked"
+  [ "$output" = "masked" ]
+
+  run bash -c "export PATH='$nobin'; '$REPO_ROOT/install.sh' --hooks 2>&1 >/dev/null"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *flock* ]]
+  jq -e '.hooks.PostToolUse[0].hooks[0].command | contains("post-tool-use.sh")' "$SETTINGS"
+}
+
+@test "--hooks says nothing about flock when flock is present" {
+  command -v flock >/dev/null 2>&1 || skip "no flock here to be quiet about"
+  mkdir -p "$FAKE_HOME/.claude"
+  run bash -c "'$REPO_ROOT/install.sh' --hooks 2>&1 >/dev/null"
+  [[ "$output" != *flock* ]]
+}
