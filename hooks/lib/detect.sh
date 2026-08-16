@@ -76,3 +76,64 @@ pursue_error_fingerprint() {
     | cut -c1-200 \
     | sha256sum | cut -c1-12
 }
+
+# ---------------------------------------------------------------------------
+# Detector state
+#
+# Detectors are counters, and counters need memory between tool calls.  That
+# memory is bounded on purpose: a pursuit runs for days across thousands of
+# calls, and an unbounded map would eventually make this hook's own jq the
+# slowest thing in the session.
+# ---------------------------------------------------------------------------
+
+PURSUE_DETECT_MAX_KEYS="${PURSUE_DETECT_MAX_KEYS:-200}"
+
+pursue_detect_state_path() { printf '%s/detect-state.json\n' "$1"; }
+
+# Print the detector state.  A missing or unparseable file yields a valid
+# empty state rather than an error: losing detector history is a degraded
+# detector, but a hook that fails on it is a broken session.
+pursue_detect_load() {
+  local f empty='{"version":1,"errors":{},"pairs":{},"files":{},"verified":{}}'
+  f="$(pursue_detect_state_path "$1")"
+  if [[ -r "$f" ]] && jq -e '.version == 1' "$f" >/dev/null 2>&1; then
+    jq -c '.' "$f" 2>/dev/null || printf '%s\n' "$empty"
+  else
+    printf '%s\n' "$empty"
+  fi
+}
+
+# Write the state atomically, next to its destination so the rename is a
+# same-filesystem rename(2).  Same reasoning as the installer's config
+# writes: a partial write here silently corrupts detector history.
+pursue_detect_save() {
+  local dest tmp
+  dest="$(pursue_detect_state_path "$1")"
+  tmp="$(mktemp "${dest}.XXXXXX" 2>/dev/null)" || return 0
+  if printf '%s\n' "$2" | jq -c '.' > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$dest" 2>/dev/null || rm -f "$tmp"
+  else
+    rm -f "$tmp"
+  fi
+  return 0
+}
+
+# Increment state.<collection>.<key>, trimming the collection when it grows
+# past the cap.  jq preserves insertion order for object keys, so dropping
+# from the front drops the oldest.
+pursue_detect_bump() {
+  printf '%s' "$1" | jq -c \
+    --arg c "$2" --arg k "$3" --argjson max "$PURSUE_DETECT_MAX_KEYS" '
+      .[$c] //= {}
+      | .[$c][$k] = ((.[$c][$k] // 0) + 1)
+      | if (.[$c] | length) > $max
+        then .[$c] = (.[$c] | to_entries | .[(($max / 2) | floor):] | from_entries)
+        else . end
+    ' 2>/dev/null || printf '%s' "$1"
+}
+
+pursue_detect_count() {
+  printf '%s' "$1" \
+    | jq -r --arg c "$2" --arg k "$3" '(.[$c][$k] // 0)' 2>/dev/null \
+    || printf '0\n'
+}

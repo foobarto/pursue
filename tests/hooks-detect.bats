@@ -117,3 +117,55 @@ teardown() { rm -rf "$TMP"; }
   run pursue_error_text
   [[ "$output" == *"permission denied"* ]]
 }
+
+@test "pursue_detect_load returns an empty state when the file is absent" {
+  run pursue_detect_load "$GOAL_DIR"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.version == 1'
+  echo "$output" | jq -e '.errors == {}'
+}
+
+@test "pursue_detect_load returns an empty state when the file is corrupt" {
+  printf 'not json at all' > "$GOAL_DIR/detect-state.json"
+  run pursue_detect_load "$GOAL_DIR"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.version == 1'
+}
+
+@test "pursue_detect_save then load round-trips" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  state="$(pursue_detect_bump "$state" errors abc123)"
+  pursue_detect_save "$GOAL_DIR" "$state"
+  run pursue_detect_load "$GOAL_DIR"
+  echo "$output" | jq -e '.errors.abc123 == 1'
+}
+
+@test "pursue_detect_bump increments an existing key" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  state="$(pursue_detect_bump "$state" errors abc)"
+  state="$(pursue_detect_bump "$state" errors abc)"
+  run pursue_detect_count "$state" errors abc
+  [ "$output" = "2" ]
+}
+
+@test "pursue_detect_count is 0 for an unseen key" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  run pursue_detect_count "$state" errors never-seen
+  [ "$output" = "0" ]
+}
+
+@test "pursue_detect_save leaves no temp file behind" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  pursue_detect_save "$GOAL_DIR" "$state"
+  run bash -c "ls '$GOAL_DIR'/detect-state.json.* 2>/dev/null | wc -l"
+  [ "$output" = "0" ]
+}
+
+@test "detector state is bounded" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  for i in $(seq 1 20); do
+    state="$(PURSUE_DETECT_MAX_KEYS=10 pursue_detect_bump "$state" errors "fp$i")"
+  done
+  run bash -c "printf '%s' '$state' | jq '.errors | length'"
+  [ "$output" -le 10 ]
+}
