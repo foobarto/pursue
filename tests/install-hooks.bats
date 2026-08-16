@@ -109,6 +109,61 @@ JSON
   [ "$status" -eq 0 ]
 }
 
+# Symlinking a harness config into a dotfiles repo (stow, chezmoi) is
+# common.  Replacing the link with a regular file detaches the config from
+# its source of truth, and the next `stow` / `chezmoi apply` silently
+# reverts the hook registration — back to hooks registered but not running,
+# with no signal.
+@test "--hooks writes through a symlinked settings.json" {
+  mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/dotfiles"
+  printf '{"model":"opus"}' > "$FAKE_HOME/dotfiles/settings.json"
+  ln -s "$FAKE_HOME/dotfiles/settings.json" "$SETTINGS"
+
+  run "$REPO_ROOT/install.sh" --hooks
+  [ "$status" -eq 0 ]
+  [ -L "$SETTINGS" ]
+  [ "$(readlink "$SETTINGS")" = "$FAKE_HOME/dotfiles/settings.json" ]
+  jq -e '.model == "opus"' "$FAKE_HOME/dotfiles/settings.json"
+  jq -e '.hooks.SessionStart[0].hooks[0].command | contains("session-start.sh")' \
+    "$FAKE_HOME/dotfiles/settings.json"
+  [ "$(find "$FAKE_HOME/.claude" -name 'settings.json.??????' | wc -l)" -eq 0 ]
+}
+
+@test "--no-hooks writes through a symlinked settings.json" {
+  mkdir -p "$FAKE_HOME/.claude" "$FAKE_HOME/dotfiles"
+  printf '{"model":"opus"}' > "$FAKE_HOME/dotfiles/settings.json"
+  ln -s "$FAKE_HOME/dotfiles/settings.json" "$SETTINGS"
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+
+  run "$REPO_ROOT/install.sh" --no-hooks
+  [ "$status" -eq 0 ]
+  [ -L "$SETTINGS" ]
+  [ "$(readlink "$SETTINGS")" = "$FAKE_HOME/dotfiles/settings.json" ]
+  jq -e '.model == "opus"' "$FAKE_HOME/dotfiles/settings.json"
+  run jq '[.hooks.SessionStart[]?.hooks[]? | select(.command | contains("session-start.sh"))] | length' \
+    "$FAKE_HOME/dotfiles/settings.json"
+  [ "$output" = "0" ]
+}
+
+@test "--hooks and --no-hooks write through a symlinked codex hooks.json" {
+  mkdir -p "$FAKE_HOME/.codex" "$FAKE_HOME/dotfiles"
+  hj="$FAKE_HOME/.codex/hooks.json"
+  printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"/opt/mine.sh"}]}]}}' \
+    > "$FAKE_HOME/dotfiles/hooks.json"
+  ln -s "$FAKE_HOME/dotfiles/hooks.json" "$hj"
+
+  "$REPO_ROOT/install.sh" --hooks >/dev/null
+  [ -L "$hj" ]
+  jq -e '[.hooks.SessionStart[].hooks[].command] | any(contains("session-start.sh"))' \
+    "$FAKE_HOME/dotfiles/hooks.json"
+
+  "$REPO_ROOT/install.sh" --no-hooks >/dev/null
+  [ -L "$hj" ]
+  [ "$(readlink "$hj")" = "$FAKE_HOME/dotfiles/hooks.json" ]
+  jq -e '[.hooks.SessionStart[].hooks[].command] | any(. == "/opt/mine.sh")' \
+    "$FAKE_HOME/dotfiles/hooks.json"
+}
+
 @test "--hooks registers hooks for codex in hooks.json" {
   mkdir -p "$FAKE_HOME/.codex"
   run "$REPO_ROOT/install.sh" --hooks

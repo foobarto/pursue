@@ -456,6 +456,25 @@ pursue_hook_entries() {
   printf '%s %s\n' PreCompact  "$repo_root/hooks/pre-compact.sh"
 }
 
+# Resolve a harness config path through any symlinks, so the rewrite lands
+# on the real file.  Symlinking ~/.claude/settings.json (or ~/.codex/
+# hooks.json) into a dotfiles repo is common — stow and chezmoi both do it —
+# and mv'ing a temp file onto the link would replace the link with a regular
+# file.  That detaches the config from its source of truth, so the next
+# `stow` / `chezmoi apply` silently reverts the hook registration and the
+# operator is back to hooks registered but never running, with no signal.
+#
+# readlink -f resolves the whole chain; if it is unavailable or fails we use
+# the path as given, which is exactly the previous behaviour.
+resolve_config_path() {
+  local resolved
+  if resolved="$(readlink -f "$1" 2>/dev/null)" && [[ -n "$resolved" ]]; then
+    printf '%s' "$resolved"
+  else
+    printf '%s' "$1"
+  fi
+}
+
 require_jq_for_hooks() {
   if ! command -v jq >/dev/null 2>&1; then
     echo "error: --hooks requires jq (the hooks parse JSON payloads)" >&2
@@ -468,7 +487,7 @@ require_jq_for_hooks() {
 # and every foreign hook.
 install_hooks_claude() {
   local settings="${CLI_PARENT[claude-code]}/settings.json"
-  local event script tmp
+  local target event script tmp
 
   if (( dry_run )); then
     while read -r event script; do
@@ -479,9 +498,10 @@ install_hooks_claude() {
 
   mkdir -p "$(dirname "$settings")" || { echo "error: mkdir $(dirname "$settings")" >&2; exit 3; }
   [[ -f "$settings" ]] || echo '{}' > "$settings"
+  target="$(resolve_config_path "$settings")"
 
   while read -r event script; do
-    tmp="$(mktemp "${settings}.XXXXXX")"
+    tmp="$(mktemp "${target}.XXXXXX")"
     jq --arg e "$event" --arg c "$script" '
       .hooks //= {}
       | .hooks[$e] //= []
@@ -493,11 +513,11 @@ install_hooks_claude() {
           ]
           + [ { hooks: [ { type: "command", command: $c, timeout: 10 } ] } ]
         )
-    ' "$settings" > "$tmp" || { echo "error: failed to update $settings" >&2; rm -f "$tmp"; exit 3; }
-    if [[ -f "$settings" ]]; then
-      chmod --reference="$settings" "$tmp" 2>/dev/null || true
+    ' "$target" > "$tmp" || { echo "error: failed to update $settings" >&2; rm -f "$tmp"; exit 3; }
+    if [[ -f "$target" ]]; then
+      chmod --reference="$target" "$tmp" 2>/dev/null || true
     fi
-    mv "$tmp" "$settings"
+    mv "$tmp" "$target"
   done < <(pursue_hook_entries)
 
   echo "done: claude-code hooks -> $settings"
@@ -506,7 +526,7 @@ install_hooks_claude() {
 # Remove only our entries from ~/.claude/settings.json.
 uninstall_hooks_claude() {
   local settings="${CLI_PARENT[claude-code]}/settings.json"
-  local event script tmp
+  local target event script tmp
   [[ -f "$settings" ]] || return 0
 
   if (( dry_run )); then
@@ -514,19 +534,21 @@ uninstall_hooks_claude() {
     return 0
   fi
 
+  target="$(resolve_config_path "$settings")"
+
   while read -r event script; do
-    tmp="$(mktemp "${settings}.XXXXXX")"
+    tmp="$(mktemp "${target}.XXXXXX")"
     jq --arg e "$event" --arg c "$script" '
       if (.hooks[$e]? | type) == "array" then
         .hooks[$e] = [ .hooks[$e][]
           | .hooks = [ .hooks[]? | select(.command != $c) ]
           | select((.hooks | length) > 0) ]
       else . end
-    ' "$settings" > "$tmp" || { rm -f "$tmp"; exit 3; }
-    if [[ -f "$settings" ]]; then
-      chmod --reference="$settings" "$tmp" 2>/dev/null || true
+    ' "$target" > "$tmp" || { rm -f "$tmp"; exit 3; }
+    if [[ -f "$target" ]]; then
+      chmod --reference="$target" "$tmp" 2>/dev/null || true
     fi
-    mv "$tmp" "$settings"
+    mv "$tmp" "$target"
   done < <(pursue_hook_entries)
 
   echo "done: removed claude-code hooks from $settings"
@@ -542,7 +564,7 @@ uninstall_hooks_claude() {
 install_hooks_codex() {
   local hooks_json="${CLI_PARENT[codex]}/hooks.json"
   local config_toml="${CLI_PARENT[codex]}/config.toml"
-  local event script tmp
+  local target event script tmp
 
   if (( dry_run )); then
     while read -r event script; do
@@ -554,9 +576,10 @@ install_hooks_codex() {
 
   mkdir -p "$(dirname "$hooks_json")" || { echo "error: mkdir $(dirname "$hooks_json")" >&2; exit 3; }
   [[ -f "$hooks_json" ]] || echo '{}' > "$hooks_json"
+  target="$(resolve_config_path "$hooks_json")"
 
   while read -r event script; do
-    tmp="$(mktemp "${hooks_json}.XXXXXX")"
+    tmp="$(mktemp "${target}.XXXXXX")"
     jq --arg e "$event" --arg c "$script" '
       .hooks //= {}
       | .hooks[$e] //= []
@@ -567,11 +590,11 @@ install_hooks_codex() {
           ]
           + [ { hooks: [ { type: "command", command: $c, timeout: 10 } ] } ]
         )
-    ' "$hooks_json" > "$tmp" || { echo "error: failed to update $hooks_json" >&2; rm -f "$tmp"; exit 3; }
-    if [[ -f "$hooks_json" ]]; then
-      chmod --reference="$hooks_json" "$tmp" 2>/dev/null || true
+    ' "$target" > "$tmp" || { echo "error: failed to update $hooks_json" >&2; rm -f "$tmp"; exit 3; }
+    if [[ -f "$target" ]]; then
+      chmod --reference="$target" "$tmp" 2>/dev/null || true
     fi
-    mv "$tmp" "$hooks_json"
+    mv "$tmp" "$target"
   done < <(pursue_hook_entries)
 
   ensure_codex_hooks_feature "$config_toml"
@@ -657,7 +680,7 @@ ensure_codex_hooks_feature() {
 
 uninstall_hooks_codex() {
   local hooks_json="${CLI_PARENT[codex]}/hooks.json"
-  local event script tmp
+  local target event script tmp
   [[ -f "$hooks_json" ]] || return 0
 
   if (( dry_run )); then
@@ -665,19 +688,21 @@ uninstall_hooks_codex() {
     return 0
   fi
 
+  target="$(resolve_config_path "$hooks_json")"
+
   while read -r event script; do
-    tmp="$(mktemp "${hooks_json}.XXXXXX")"
+    tmp="$(mktemp "${target}.XXXXXX")"
     jq --arg e "$event" --arg c "$script" '
       if (.hooks[$e]? | type) == "array" then
         .hooks[$e] = [ .hooks[$e][]
           | .hooks = [ .hooks[]? | select(.command != $c) ]
           | select((.hooks | length) > 0) ]
       else . end
-    ' "$hooks_json" > "$tmp" || { rm -f "$tmp"; exit 3; }
-    if [[ -f "$hooks_json" ]]; then
-      chmod --reference="$hooks_json" "$tmp" 2>/dev/null || true
+    ' "$target" > "$tmp" || { rm -f "$tmp"; exit 3; }
+    if [[ -f "$target" ]]; then
+      chmod --reference="$target" "$tmp" 2>/dev/null || true
     fi
-    mv "$tmp" "$hooks_json"
+    mv "$tmp" "$target"
   done < <(pursue_hook_entries)
 
   echo "done: removed codex hooks from $hooks_json"
