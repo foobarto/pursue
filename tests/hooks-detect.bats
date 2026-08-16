@@ -650,3 +650,13 @@ pt_payload() {
   run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' | grep -c retry_thrash"
   [ "$output" = "1" ]
 }
+
+@test "a non-canonical threshold override still fires the detector" {
+  state="$(pursue_detect_load "$GOAL_DIR")"
+  for c in a b c; do
+    PURSUE_PAYLOAD="$(fail_payload "$c" "npm not found")"
+    state="$(PURSUE_REPEAT_THRESHOLD='03' pursue_detect_failures "$GOAL_DIR" "$state" "$PROJ")"
+  done
+  run bash -c "jq -r 'select(.kind==\"trigger\") | .name' '$GOAL_DIR/triggers.jsonl' | grep -c repeated_failure"
+  [ "$output" = "1" ]
+}

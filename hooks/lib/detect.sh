@@ -235,14 +235,17 @@ pursue_detect_failures() {
 
   state="$(pursue_detect_bump "$state" errors "$fp")"
   n="$(pursue_detect_count "$state" errors "$fp")"
-  if [[ "$n" == "$PURSUE_REPEAT_THRESHOLD" ]]; then
+  # Arithmetic, not string, comparison: a non-canonical override such as
+  # PURSUE_REPEAT_THRESHOLD="03" would never string-equal a count and would
+  # silently disable the detector for the whole session.
+  if [[ "$n" -eq "$PURSUE_REPEAT_THRESHOLD" ]]; then
     pursue_detect_trigger "$goal_dir" repeated_failure \
       "$(jq -cn --arg f "$fp" --argjson c "$n" '{fingerprint: $f, count: $c}')"
   fi
 
   state="$(pursue_detect_bump "$state" pairs "$pair")"
   n="$(pursue_detect_count "$state" pairs "$pair")"
-  if [[ "$n" == "$PURSUE_THRASH_THRESHOLD" ]]; then
+  if [[ "$n" -eq "$PURSUE_THRASH_THRESHOLD" ]]; then
     pursue_detect_trigger "$goal_dir" retry_thrash \
       "$(jq -cn --arg f "$fp" --arg d "$digest" --arg t "$tree" --argjson c "$n" \
            '{fingerprint: $f, input_digest: $d, tree: $t, count: $c}')"
