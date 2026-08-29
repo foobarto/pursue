@@ -5,6 +5,11 @@ Thanks for considering a contribution. This repo ships one skill:
 to gain a goal-pursuit capability. The skill *is* the root
 [`SKILL.md`](./SKILL.md).
 
+Report vulnerabilities through the repository Security tab or the
+[account-wide security policy](https://github.com/foobarto/.github/blob/main/SECURITY.md),
+not a public issue. Participation is subject to the account-wide
+[Code of Conduct](https://github.com/foobarto/.github/blob/main/CODE_OF_CONDUCT.md).
+
 ## Editing the skill
 
 The skill lives entirely in `SKILL.md`, with YAML frontmatter up top:
